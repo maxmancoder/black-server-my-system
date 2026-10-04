@@ -5659,8 +5659,8 @@ class QuietThreadingHTTPServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
-def create_http_server(preferred_port: int) -> Tuple[ThreadingHTTPServer, int]:
-    """Create the threaded HTTP server bound to localhost on a free port."""
+def create_http_server(preferred_port: int, host: str = HOST) -> Tuple[ThreadingHTTPServer, int]:
+    """Create the threaded HTTP server bound to a local address on a free port."""
     handler = functools.partial(
         DownloadRequestHandler, directory=str(DOWNLOADS_DIR)
     )
@@ -5671,7 +5671,7 @@ def create_http_server(preferred_port: int) -> Tuple[ThreadingHTTPServer, int]:
 
     for port in candidates:
         try:
-            httpd = QuietThreadingHTTPServer((HOST, port), handler)
+            httpd = QuietThreadingHTTPServer((host, port), handler)
         except OSError as exc:
             last_error = exc
             logger.warning("Port %s is not available: %s", port, exc)
@@ -5730,6 +5730,17 @@ def run(args: argparse.Namespace) -> int:
         print(f"[ERROR] downloads directory is missing: {DOWNLOADS_DIR}")
         return 1
 
+    # Render.com / other hosting platforms: bind to the public interface and
+    # honor the $PORT they inject.  The platform routes its own domain to this
+    # process, so tunnels are never needed here.
+    host = "0.0.0.0" if args.render else HOST
+    base_port = args.port
+    if args.render and os.environ.get("PORT"):
+        try:
+            base_port = int(os.environ["PORT"])
+        except ValueError:
+            base_port = args.port
+
     # Prevent duplicate instances.
     acquired, existing_pid = acquire_single_instance_lock()
     if not acquired:
@@ -5761,7 +5772,7 @@ def run(args: argparse.Namespace) -> int:
     try:
         # 1) Local file server.
         try:
-            httpd, port = create_http_server(args.port)
+            httpd, port = create_http_server(base_port, host=host)
         except OSError as exc:
             print(f"[ERROR] Could not start the local server: {exc}")
             return 1
@@ -5769,22 +5780,29 @@ def run(args: argparse.Namespace) -> int:
         threading.Thread(
             target=httpd.serve_forever, name="http-server", daemon=True
         ).start()
-        local_url = f"http://{HOST}:{port}"
+        local_url = f"http://{host}:{port}"
 
-        if not wait_for_port(HOST, port, timeout=10):
+        if not wait_for_port("127.0.0.1" if args.render else host, port, timeout=10):
             print("[ERROR] Local server did not come up on localhost.")
             return 1
-        if port != args.port:
-            print(f"[i] Port {args.port} was busy; using {port} instead.")
+        if port != base_port:
+            print(f"[i] Port {base_port} was busy; using {port} instead.")
         print(f"[OK] Local server listening on {local_url}")
         print(f"[OK] Serving files from {DOWNLOADS_DIR}")
 
         # 2) Tunnel (optional).
-        if args.no_tunnel:
-            print_banner(local_url, None, DOWNLOADS_DIR)
-            print("[i] Tunnel disabled (--no-tunnel). Local access only.")
-            while not stop_event.wait(0.5):
-                pass
+        if args.no_tunnel or args.render:
+            if args.render:
+                print("[i] Render mode: public traffic is routed by the hosting platform.")
+                print_banner(local_url, None, DOWNLOADS_DIR)
+                print("[i] Tunnel disabled; the platform serves the public URL.")
+                while not stop_event.wait(0.5):
+                    pass
+            else:
+                print_banner(local_url, None, DOWNLOADS_DIR)
+                print("[i] Tunnel disabled (--no-tunnel). Local access only.")
+                while not stop_event.wait(0.5):
+                    pass
             return 0
 
         exe = ensure_cloudflared(force_download=args.download_cloudflared)
@@ -5998,6 +6016,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--port", type=int, default=DEFAULT_PORT,
         help="preferred local port (falls back to a free port if busy)",
+    )
+    parser.add_argument(
+        "--render", action="store_true",
+        help="hosting-platform mode: bind to 0.0.0.0, use $PORT, no tunnel",
     )
     parser.add_argument(
         "--no-tunnel", action="store_true",
