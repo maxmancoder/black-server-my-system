@@ -1,0 +1,8 @@
+language = "python3"
+entrypoint = "server.py"
+run = "python server.py --render --no-browser"
+
+[env]
+
+[nix]
+channel = "stable-24_05"

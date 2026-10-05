@@ -5730,16 +5730,16 @@ def run(args: argparse.Namespace) -> int:
         print(f"[ERROR] downloads directory is missing: {DOWNLOADS_DIR}")
         return 1
 
-    # Render.com / other hosting platforms: bind to the public interface and
-    # honor the $PORT they inject.  The platform routes its own domain to this
-    # process, so tunnels are never needed here.
+    # Render.com / Replit / other hosting platforms: bind to the public
+    # interface and honor the $PORT they inject.  The platform routes its own
+    # domain to this process, so tunnels are never needed here.
     host = "0.0.0.0" if args.render else HOST
-    base_port = args.port
+    base_port = 8000 if args.render else args.port
     if args.render and os.environ.get("PORT"):
         try:
             base_port = int(os.environ["PORT"])
         except ValueError:
-            base_port = args.port
+            pass
 
     # Prevent duplicate instances.
     acquired, existing_pid = acquire_single_instance_lock()
