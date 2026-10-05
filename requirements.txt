@@ -1,7 +1,5 @@
-# This project intentionally depends on the Python standard library only.
-# There are no third-party runtime dependencies to install.
-#
-# Required: Python 3.9 or newer (tested with Python 3.13).
-#
-# Optional (installed automatically when needed, not through pip):
-#   cloudflared  - downloaded by server.py / start_server.bat into bin/
+# Render keeps the process alive by routing traffic to $PORT; server.py
+# detects RENDER and switches to headless mode (no tunnel, no browser).
+# This project only uses the Python standard library, so there are no
+# third-party packages to install - the file exists so Render's Python
+# build step finds a requirements file.

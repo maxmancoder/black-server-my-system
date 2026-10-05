@@ -43,6 +43,7 @@ import re
 import shutil
 import signal
 import socket
+import socketserver
 import subprocess
 import sys
 import threading
@@ -75,6 +76,25 @@ DEFAULT_PORT: int = 8080
 PORT_SCAN_LIMIT: int = 20        # how many ports to try after the default one
 CHUNK_SIZE: int = 256 * 1024     # streaming chunk size (keeps RAM usage flat)
 UPLOAD_CHUNK: int = 512 * 1024   # larger reads while receiving uploads
+
+# Render.com (and other PaaS hosts) inject PORT and expect the process to
+# listen on 0.0.0.0; headless hosts have no browser and no local disk worth
+# persisting.  These switches keep the desktop behaviour as the default.
+PAAS: bool = bool(os.environ.get("RENDER")) or bool(os.environ.get("BS_HOST")) or bool(os.environ.get("BS_PAAS"))
+PAAS_HOST: str = os.environ.get("BS_HOST", "0.0.0.0")
+PAAS_PORT: int = int(os.environ.get("PORT") or DEFAULT_PORT)
+
+
+def bind_host() -> str:
+    """Interface to listen on (0.0.0.0 only when running on a PaaS host)."""
+    return PAAS_HOST if PAAS else HOST
+
+
+def bind_port(default_port: int) -> int:
+    """Preferred port (a PaaS-provided PORT always wins and never shifts)."""
+    if PAAS and PAAS_PORT:
+        return PAAS_PORT
+    return default_port
 
 # Background job store for long-running move/copy (avoids Cloudflare tunnel timeouts).
 _JOBS: dict = {}
@@ -5652,6 +5672,19 @@ class QuietThreadingHTTPServer(ThreadingHTTPServer):
 
     daemon_threads = True
 
+    def server_bind(self) -> None:
+        """Bind without the reverse-DNS lookup done by HTTPServer.
+
+        ``HTTPServer.server_bind`` calls ``socket.getfqdn(host)`` which can
+        block for seconds when a PaaS host binds ``0.0.0.0`` and no reverse
+        DNS record exists.  Binding the socket and deriving ``server_name``
+        locally keeps startup instant everywhere.
+        """
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host if host not in ("0.0.0.0", "::", "") else "localhost"
+        self.server_port = port
+
     def handle_error(self, request, client_address) -> None:
         exc = sys.exc_info()[1]
         if isinstance(exc, (ConnectionError, TimeoutError)):
@@ -5659,8 +5692,8 @@ class QuietThreadingHTTPServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
-def create_http_server(preferred_port: int, host: str = HOST) -> Tuple[ThreadingHTTPServer, int]:
-    """Create the threaded HTTP server bound to a local address on a free port."""
+def create_http_server(preferred_port: int) -> Tuple[ThreadingHTTPServer, int]:
+    """Create the threaded HTTP server bound to localhost on a free port."""
     handler = functools.partial(
         DownloadRequestHandler, directory=str(DOWNLOADS_DIR)
     )
@@ -5671,7 +5704,7 @@ def create_http_server(preferred_port: int, host: str = HOST) -> Tuple[Threading
 
     for port in candidates:
         try:
-            httpd = QuietThreadingHTTPServer((host, port), handler)
+            httpd = QuietThreadingHTTPServer((bind_host(), port), handler)
         except OSError as exc:
             last_error = exc
             logger.warning("Port %s is not available: %s", port, exc)
@@ -5730,19 +5763,10 @@ def run(args: argparse.Namespace) -> int:
         print(f"[ERROR] downloads directory is missing: {DOWNLOADS_DIR}")
         return 1
 
-    # Render.com / Replit / other hosting platforms: bind to the public
-    # interface and honor the $PORT they inject.  The platform routes its own
-    # domain to this process, so tunnels are never needed here.
-    host = "0.0.0.0" if args.render else HOST
-    base_port = 8000 if args.render else args.port
-    if args.render and os.environ.get("PORT"):
-        try:
-            base_port = int(os.environ["PORT"])
-        except ValueError:
-            pass
-
-    # Prevent duplicate instances.
-    acquired, existing_pid = acquire_single_instance_lock()
+    # Prevent duplicate instances (skipped on PaaS hosts: one dyno per host).
+    acquired, existing_pid = True, 0
+    if not PAAS:
+        acquired, existing_pid = acquire_single_instance_lock()
     if not acquired:
         print("[ERROR] Another instance of the server is already running.")
         print(f"        Existing process id: {existing_pid}")
@@ -5771,8 +5795,9 @@ def run(args: argparse.Namespace) -> int:
 
     try:
         # 1) Local file server.
+        wanted_port = bind_port(args.port)
         try:
-            httpd, port = create_http_server(base_port, host=host)
+            httpd, port = create_http_server(wanted_port)
         except OSError as exc:
             print(f"[ERROR] Could not start the local server: {exc}")
             return 1
@@ -5780,29 +5805,33 @@ def run(args: argparse.Namespace) -> int:
         threading.Thread(
             target=httpd.serve_forever, name="http-server", daemon=True
         ).start()
+        host = bind_host()
         local_url = f"http://{host}:{port}"
 
-        if not wait_for_port("127.0.0.1" if args.render else host, port, timeout=10):
+        if host in ("127.0.0.1", "localhost") and not wait_for_port(
+            HOST, port, timeout=10
+        ):
             print("[ERROR] Local server did not come up on localhost.")
             return 1
-        if port != base_port:
-            print(f"[i] Port {base_port} was busy; using {port} instead.")
+        if port != wanted_port:
+            print(f"[i] Port {wanted_port} was busy; using {port} instead.")
         print(f"[OK] Local server listening on {local_url}")
         print(f"[OK] Serving files from {DOWNLOADS_DIR}")
 
-        # 2) Tunnel (optional).
-        if args.no_tunnel or args.render:
-            if args.render:
-                print("[i] Render mode: public traffic is routed by the hosting platform.")
-                print_banner(local_url, None, DOWNLOADS_DIR)
-                print("[i] Tunnel disabled; the platform serves the public URL.")
-                while not stop_event.wait(0.5):
-                    pass
-            else:
-                print_banner(local_url, None, DOWNLOADS_DIR)
-                print("[i] Tunnel disabled (--no-tunnel). Local access only.")
-                while not stop_event.wait(0.5):
-                    pass
+        # 2) Headless mode on a PaaS host (Render, etc.): the platform routes
+        #    traffic to this port, so there is nothing else to start.
+        if PAAS:
+            print("[OK] Headless hosting mode (RENDER/BS_HOST detected).")
+            while not stop_event.wait(0.5):
+                pass
+            return 0
+
+        # 3) Tunnel (optional).
+        if args.no_tunnel:
+            print_banner(local_url, None, DOWNLOADS_DIR)
+            print("[i] Tunnel disabled (--no-tunnel). Local access only.")
+            while not stop_event.wait(0.5):
+                pass
             return 0
 
         exe = ensure_cloudflared(force_download=args.download_cloudflared)
@@ -5996,7 +6025,8 @@ def run(args: argparse.Namespace) -> int:
         if httpd is not None:
             httpd.shutdown()
             httpd.server_close()
-        release_single_instance_lock()
+        if not PAAS:
+            release_single_instance_lock()
         logger.info("Server stopped cleanly.")
         print("[i] Server stopped.")
 
@@ -6016,10 +6046,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--port", type=int, default=DEFAULT_PORT,
         help="preferred local port (falls back to a free port if busy)",
-    )
-    parser.add_argument(
-        "--render", action="store_true",
-        help="hosting-platform mode: bind to 0.0.0.0, use $PORT, no tunnel",
     )
     parser.add_argument(
         "--no-tunnel", action="store_true",

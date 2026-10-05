@@ -1,0 +1,17 @@
+# Render blueprint for the Black Server My System file server.
+# Deploy from the dashboard (New -> Blueprint) or keep it in sync with the
+# service created through the Render API.
+services:
+  - type: web
+    name: black-server-my-system
+    runtime: python
+    plan: free
+    region: singapore
+    branch: master
+    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    healthCheckPath: /
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
