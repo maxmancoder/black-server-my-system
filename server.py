@@ -83,11 +83,19 @@ def _env_flag(name: str) -> bool:
     return (os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-# Render.com (and similar platforms) set RENDER=true and inject PORT.  There the
-# platform owns the public URL and the public interface, so the quick tunnel,
-# the browser launch and the single-instance lock are all skipped.
-IS_CLOUD: bool = _env_flag("RENDER") or _env_flag("RENDER_CLOUD")
-CLOUD_BIND_HOST: str = "0.0.0.0"
+# PaaS hosts (Render, Replit, Koyeb, Railway, ...) inject PORT, route traffic to
+# whatever the process listens on (so it must be 0.0.0.0) and hand out the
+# public URL themselves - no quick tunnel, no browser, no instance lock.
+# Render sets RENDER=true; BS_PAAS / BS_HOST are the explicit opt-ins used by
+# the bundled render.yaml, .replit and Procfile.  Desktop stays the default.
+PAAS: bool = (
+    _env_flag("RENDER")
+    or _env_flag("RENDER_CLOUD")
+    or bool((os.environ.get("BS_PAAS") or "").strip())
+    or bool((os.environ.get("BS_HOST") or "").strip())
+)
+IS_CLOUD: bool = PAAS          # CLI-layer alias (--cloud)
+PAAS_HOST: str = os.environ.get("BS_HOST", "0.0.0.0")
 
 # Background job store for long-running move/copy (avoids Cloudflare tunnel timeouts).
 _JOBS: dict = {}
@@ -257,21 +265,19 @@ def is_process_running(pid: int) -> bool:
     return str(pid) in (result.stdout or "")
 
 
-def cloud_bind_host() -> str:
-    """Bind address for this machine: ``HOST`` env, else the cloud default."""
+def default_bind_host() -> str:
+    """Interface to listen on: ``HOST``/``BS_HOST`` env, else 0.0.0.0 in the cloud."""
     env = (os.environ.get("HOST") or "").strip()
     if env:
         return env
-    return CLOUD_BIND_HOST if IS_CLOUD else HOST
+    return PAAS_HOST if PAAS else HOST
 
 
-def cloud_port(default: int) -> int:
-    """Platform-assigned port (``PORT`` env, e.g. Render) or *default*."""
+def bind_port(default: int) -> int:
+    """Preferred port: a PaaS-provided ``PORT`` always wins and never shifts."""
     raw = (os.environ.get("PORT") or "").strip()
-    if raw.isdigit():
-        value = int(raw)
-        if 0 < value < 65536:
-            return value
+    if PAAS and raw.isdigit() and 0 < int(raw) < 65536:
+        return int(raw)
     return default
 
 
@@ -5692,7 +5698,7 @@ class QuietThreadingHTTPServer(ThreadingHTTPServer):
         """
         socketserver.TCPServer.server_bind(self)
         host, port = self.server_address[:2]
-        self.server_name = host
+        self.server_name = host if host not in ("0.0.0.0", "::", "") else "localhost"
         self.server_port = port
 
     def handle_error(self, request, client_address) -> None:
@@ -5713,11 +5719,11 @@ def create_http_server(
     ``0.0.0.0`` and ``exact_port=True`` so the server binds the single port the
     platform routed to us instead of silently scanning to another one.
     """
-    bind_host_override = host
+    bind_host_override = (host or "").strip()
 
     def bind_host() -> str:
-        """Address to listen on: explicit override, else cloud/local default."""
-        return bind_host_override or cloud_bind_host()
+        """Interface to listen on: ``--host`` override, else the host default."""
+        return bind_host_override or default_bind_host()
 
     handler = functools.partial(
         DownloadRequestHandler, directory=str(DOWNLOADS_DIR)
@@ -5849,15 +5855,26 @@ def run(args: argparse.Namespace) -> int:
         print(f"[OK] Local server listening on {local_url}")
         print(f"[OK] Serving files from {DOWNLOADS_DIR}")
 
-        # 2) Tunnel (optional).
-        if args.no_tunnel:
+        # 2) Headless hosting on a PaaS host (Render, Replit, ...): the platform
+        #    routes traffic to this port and owns the public URL, so there is
+        #    nothing left to start.
+        if args.cloud:
             external = (os.environ.get("RENDER_EXTERNAL_URL") or "").strip()
             platform_url = f"https://{external}" if external else None
+            print("[OK] Headless hosting mode (PaaS host detected).")
             print_banner(local_url, platform_url, DOWNLOADS_DIR)
             if platform_url:
                 print("[i] Tunnel disabled: the platform provides the public URL.")
             else:
                 print("[i] Tunnel disabled (--no-tunnel). Local access only.")
+            while not stop_event.wait(0.5):
+                pass
+            return 0
+
+        # 3) Tunnel (optional).
+        if args.no_tunnel:
+            print_banner(local_url, None, DOWNLOADS_DIR)
+            print("[i] Tunnel disabled (--no-tunnel). Local access only.")
             while not stop_event.wait(0.5):
                 pass
             return 0
@@ -6131,17 +6148,18 @@ def main(argv: Optional[list] = None) -> int:
     args = parser.parse_args(argv)
     args.allow_ssh_fallback = not args.no_ssh_fallback
 
-    # Cloud platforms (Render, ...) announce themselves through RENDER=true and
-    # inject PORT; there the public URL comes from the platform, so the quick
-    # tunnel, the browser launch and the local-only port scan are all skipped.
-    if IS_CLOUD and not args.cloud:
+    # Cloud platforms (Render, Replit, ...) announce themselves through
+    # RENDER / BS_PAAS / BS_HOST and inject PORT; there the public URL comes from
+    # the platform, so the quick tunnel, the browser launch and the local-only
+    # port scan are all skipped.
+    if PAAS:
         args.cloud = True
     if args.cloud:
         args.cloud = True
-        args.host = args.host or cloud_bind_host()
+        args.host = args.host or (PAAS_HOST if PAAS else "0.0.0.0")
         args.no_tunnel = True
         args.no_browser = True
-        args.port = cloud_port(args.port)
+        args.port = bind_port(args.port)
 
     if args.ensure_cloudflared or args.download_cloudflared:
         setup_logging(args.verbose)
