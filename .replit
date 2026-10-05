@@ -1,8 +1,11 @@
 language = "python3"
 entrypoint = "server.py"
-run = "python server.py --render --no-browser"
+run = "python server.py --no-browser"
 
 [env]
+# server.py switches to headless hosting mode (bind 0.0.0.0, honour PORT,
+# no tunnel) when BS_HOST/BS_PAAS is set, so no extra flags are needed.
+BS_PAAS = "1"
 
 [nix]
 channel = "stable-24_05"
