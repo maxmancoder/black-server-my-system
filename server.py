@@ -3623,27 +3623,55 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
   .set-seg button.on {{
     background: var(--blue); color: #fff;
   }}
+  /* settings modal is a bit wider so the theme tiles breathe */
+  .modal.set-modal {{ max-width: 430px; }}
+  /* stacked row: label on top, control full width underneath */
+  .set-row.stack {{ flex-direction: column; align-items: stretch; gap: 11px; }}
+  /* theme picker: uniform tiles, wrapping rows stay centred */
   .set-themes {{
-    display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end;
-    max-width: 340px; flex-shrink: 0;
+    display: flex; flex-wrap: wrap; gap: 8px;
+    justify-content: center; width: 100%;
   }}
   .set-themes button {{
-    display: flex; align-items: center; gap: 7px;
-    padding: 6px 10px;
+    position: relative;
+    display: flex; flex-direction: column; align-items: center;
+    gap: 7px; padding: 9px 6px 8px;
+    width: calc(25% - 6px); min-width: 74px;
     background: var(--input-bg); border: 1px solid var(--border);
-    border-radius: 999px; color: var(--text3);
-    font-size: 12px; font-weight: 600; font-family: inherit;
-    cursor: pointer; transition: all .15s;
+    border-radius: 13px; color: var(--text3);
+    font-size: 11.5px; font-weight: 600; font-family: inherit;
+    cursor: pointer; transition: all .18s cubic-bezier(.16,1,.3,1);
   }}
   .set-themes button:hover {{
-    border-color: var(--blue); color: var(--text);
+    border-color: rgba(var(--accent-rgb), .6); color: var(--text);
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(0,0,0,.22);
   }}
   .set-themes button.on {{
     background: rgba(var(--accent-rgb), .16);
-    border-color: rgba(var(--accent-rgb), .65);
+    border-color: rgba(var(--accent-rgb), .8);
     color: var(--text);
+    box-shadow: 0 0 0 1px rgba(var(--accent-rgb), .35),
+                0 8px 20px rgba(var(--accent-rgb), .18);
   }}
-  .set-themes .tsw {{ width: 15px; height: 15px; }}
+  .set-themes .tsw {{
+    width: 100%; height: 26px; border-radius: 8px;
+    border: 1px solid rgba(255,255,255,.18);
+  }}
+  .set-themes .tnm {{
+    flex: none; max-width: 100%; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; line-height: 1.2;
+  }}
+  .set-themes .tck {{
+    position: absolute; top: 5px; inset-inline-end: 5px;
+    width: 16px; height: 16px; line-height: 15px; text-align: center;
+    border-radius: 50%; font-size: 10px; color: #fff;
+    background: rgb(var(--accent-rgb));
+    box-shadow: 0 2px 6px rgba(0,0,0,.35);
+  }}
+  @media (max-width: 420px) {{
+    .set-themes button {{ width: calc(33.333% - 6px); }}
+  }}
   .set-badge {{
     font-size: 11px; font-weight: 700; color: var(--green);
     background: rgba(34,197,94,.12); border: 1px solid rgba(34,197,94,.3);
@@ -4164,12 +4192,12 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
 
 <!-- glass modal: settings -->
 <div class="modal-back" id="setModal" onclick="if(event.target===this)closeSettings()">
-  <div class="modal" role="dialog" aria-modal="true">
+  <div class="modal set-modal" role="dialog" aria-modal="true">
     <div class="set-brand">
       <div class="bn">&#9679; Black Server My System</div>
       <div class="bv">File Manager &middot; Settings</div>
     </div>
-    <div class="set-row">
+    <div class="set-row stack">
       <div class="set-info">
         <div class="st">تم رابط کاربری</div>
         <div class="ss">هر تمی را انتخاب کنید — با انیمیشن نرم</div>
