@@ -77,24 +77,17 @@ PORT_SCAN_LIMIT: int = 20        # how many ports to try after the default one
 CHUNK_SIZE: int = 256 * 1024     # streaming chunk size (keeps RAM usage flat)
 UPLOAD_CHUNK: int = 512 * 1024   # larger reads while receiving uploads
 
-# Render.com (and other PaaS hosts) inject PORT and expect the process to
-# listen on 0.0.0.0; headless hosts have no browser and no local disk worth
-# persisting.  These switches keep the desktop behaviour as the default.
-PAAS: bool = bool(os.environ.get("RENDER")) or bool(os.environ.get("BS_HOST")) or bool(os.environ.get("BS_PAAS"))
-PAAS_HOST: str = os.environ.get("BS_HOST", "0.0.0.0")
-PAAS_PORT: int = int(os.environ.get("PORT") or DEFAULT_PORT)
+
+def _env_flag(name: str) -> bool:
+    """True when an environment variable looks like a boolean switch."""
+    return (os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def bind_host() -> str:
-    """Interface to listen on (0.0.0.0 only when running on a PaaS host)."""
-    return PAAS_HOST if PAAS else HOST
-
-
-def bind_port(default_port: int) -> int:
-    """Preferred port (a PaaS-provided PORT always wins and never shifts)."""
-    if PAAS and PAAS_PORT:
-        return PAAS_PORT
-    return default_port
+# Render.com (and similar platforms) set RENDER=true and inject PORT.  There the
+# platform owns the public URL and the public interface, so the quick tunnel,
+# the browser launch and the single-instance lock are all skipped.
+IS_CLOUD: bool = _env_flag("RENDER") or _env_flag("RENDER_CLOUD")
+CLOUD_BIND_HOST: str = "0.0.0.0"
 
 # Background job store for long-running move/copy (avoids Cloudflare tunnel timeouts).
 _JOBS: dict = {}
@@ -262,6 +255,24 @@ def is_process_running(pid: int) -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     return str(pid) in (result.stdout or "")
+
+
+def cloud_bind_host() -> str:
+    """Bind address for this machine: ``HOST`` env, else the cloud default."""
+    env = (os.environ.get("HOST") or "").strip()
+    if env:
+        return env
+    return CLOUD_BIND_HOST if IS_CLOUD else HOST
+
+
+def cloud_port(default: int) -> int:
+    """Platform-assigned port (``PORT`` env, e.g. Render) or *default*."""
+    raw = (os.environ.get("PORT") or "").strip()
+    if raw.isdigit():
+        value = int(raw)
+        if 0 < value < 65536:
+            return value
+    return default
 
 
 def acquire_single_instance_lock() -> Tuple[bool, Optional[int]]:
@@ -5673,16 +5684,15 @@ class QuietThreadingHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def server_bind(self) -> None:
-        """Bind without the reverse-DNS lookup done by HTTPServer.
+        """Bind without the reverse-DNS lookup ``HTTPServer`` performs.
 
-        ``HTTPServer.server_bind`` calls ``socket.getfqdn(host)`` which can
-        block for seconds when a PaaS host binds ``0.0.0.0`` and no reverse
-        DNS record exists.  Binding the socket and deriving ``server_name``
-        locally keeps startup instant everywhere.
+        ``HTTPServer.server_bind()`` calls ``socket.getfqdn()``, which stalls
+        for seconds (or fails outright) when a container has no working DNS,
+        so only the plain socket bookkeeping is kept here.
         """
         socketserver.TCPServer.server_bind(self)
         host, port = self.server_address[:2]
-        self.server_name = host if host not in ("0.0.0.0", "::", "") else "localhost"
+        self.server_name = host
         self.server_port = port
 
     def handle_error(self, request, client_address) -> None:
@@ -5692,15 +5702,33 @@ class QuietThreadingHTTPServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
-def create_http_server(preferred_port: int) -> Tuple[ThreadingHTTPServer, int]:
-    """Create the threaded HTTP server bound to localhost on a free port."""
+def create_http_server(
+    preferred_port: int,
+    host: Optional[str] = None,
+    exact_port: bool = False,
+) -> Tuple[ThreadingHTTPServer, int]:
+    """Create the threaded HTTP server bound to a free port.
+
+    *host* defaults to the module ``HOST`` (localhost).  Cloud platforms pass
+    ``0.0.0.0`` and ``exact_port=True`` so the server binds the single port the
+    platform routed to us instead of silently scanning to another one.
+    """
+    bind_host_override = host
+
+    def bind_host() -> str:
+        """Address to listen on: explicit override, else cloud/local default."""
+        return bind_host_override or cloud_bind_host()
+
     handler = functools.partial(
         DownloadRequestHandler, directory=str(DOWNLOADS_DIR)
     )
     last_error: Optional[OSError] = None
 
-    candidates = list(range(preferred_port, preferred_port + PORT_SCAN_LIMIT))
-    candidates.append(0)
+    if exact_port:
+        candidates = [preferred_port]
+    else:
+        candidates = list(range(preferred_port, preferred_port + PORT_SCAN_LIMIT))
+        candidates.append(0)
 
     for port in candidates:
         try:
@@ -5763,15 +5791,18 @@ def run(args: argparse.Namespace) -> int:
         print(f"[ERROR] downloads directory is missing: {DOWNLOADS_DIR}")
         return 1
 
-    # Prevent duplicate instances (skipped on PaaS hosts: one dyno per host).
-    acquired, existing_pid = True, 0
-    if not PAAS:
+    # Prevent duplicate instances (irrelevant in the cloud: one process per box).
+    lock_acquired = False
+    if args.cloud:
+        print("[i] Cloud mode: single-instance lock disabled.")
+    else:
         acquired, existing_pid = acquire_single_instance_lock()
-    if not acquired:
-        print("[ERROR] Another instance of the server is already running.")
-        print(f"        Existing process id: {existing_pid}")
-        print("        Stop it (Ctrl+C in its window) and try again.")
-        return 1
+        if not acquired:
+            print("[ERROR] Another instance of the server is already running.")
+            print(f"        Existing process id: {existing_pid}")
+            print("        Stop it (Ctrl+C in its window) and try again.")
+            return 1
+        lock_acquired = True
 
     httpd: Optional[ThreadingHTTPServer] = None
     tunnel: Optional[CloudflareTunnel] = None
@@ -5795,9 +5826,10 @@ def run(args: argparse.Namespace) -> int:
 
     try:
         # 1) Local file server.
-        wanted_port = bind_port(args.port)
         try:
-            httpd, port = create_http_server(wanted_port)
+            httpd, port = create_http_server(
+                args.port, args.host, exact_port=args.cloud
+            )
         except OSError as exc:
             print(f"[ERROR] Could not start the local server: {exc}")
             return 1
@@ -5805,31 +5837,27 @@ def run(args: argparse.Namespace) -> int:
         threading.Thread(
             target=httpd.serve_forever, name="http-server", daemon=True
         ).start()
-        host = bind_host()
-        local_url = f"http://{host}:{port}"
+        bound_host = httpd.server_address[0]
+        shown_host = "127.0.0.1" if bound_host in ("0.0.0.0", "::", "") else bound_host
+        local_url = f"http://{shown_host}:{port}"
 
-        if host in ("127.0.0.1", "localhost") and not wait_for_port(
-            HOST, port, timeout=10
-        ):
+        if not wait_for_port(shown_host, port, timeout=10):
             print("[ERROR] Local server did not come up on localhost.")
             return 1
-        if port != wanted_port:
-            print(f"[i] Port {wanted_port} was busy; using {port} instead.")
+        if not args.cloud and port != args.port:
+            print(f"[i] Port {args.port} was busy; using {port} instead.")
         print(f"[OK] Local server listening on {local_url}")
         print(f"[OK] Serving files from {DOWNLOADS_DIR}")
 
-        # 2) Headless mode on a PaaS host (Render, etc.): the platform routes
-        #    traffic to this port, so there is nothing else to start.
-        if PAAS:
-            print("[OK] Headless hosting mode (RENDER/BS_HOST detected).")
-            while not stop_event.wait(0.5):
-                pass
-            return 0
-
-        # 3) Tunnel (optional).
+        # 2) Tunnel (optional).
         if args.no_tunnel:
-            print_banner(local_url, None, DOWNLOADS_DIR)
-            print("[i] Tunnel disabled (--no-tunnel). Local access only.")
+            external = (os.environ.get("RENDER_EXTERNAL_URL") or "").strip()
+            platform_url = f"https://{external}" if external else None
+            print_banner(local_url, platform_url, DOWNLOADS_DIR)
+            if platform_url:
+                print("[i] Tunnel disabled: the platform provides the public URL.")
+            else:
+                print("[i] Tunnel disabled (--no-tunnel). Local access only.")
             while not stop_event.wait(0.5):
                 pass
             return 0
@@ -6025,7 +6053,7 @@ def run(args: argparse.Namespace) -> int:
         if httpd is not None:
             httpd.shutdown()
             httpd.server_close()
-        if not PAAS:
+        if lock_acquired:
             release_single_instance_lock()
         logger.info("Server stopped cleanly.")
         print("[i] Server stopped.")
@@ -6046,6 +6074,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--port", type=int, default=DEFAULT_PORT,
         help="preferred local port (falls back to a free port if busy)",
+    )
+    parser.add_argument(
+        "--host", default=None,
+        help="bind address (default: 127.0.0.1, or 0.0.0.0 in cloud mode)",
+    )
+    parser.add_argument(
+        "--cloud", action="store_true",
+        help="platform-as-a-service mode: bind 0.0.0.0, use $PORT, no tunnel",
     )
     parser.add_argument(
         "--no-tunnel", action="store_true",
@@ -6094,6 +6130,18 @@ def main(argv: Optional[list] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     args.allow_ssh_fallback = not args.no_ssh_fallback
+
+    # Cloud platforms (Render, ...) announce themselves through RENDER=true and
+    # inject PORT; there the public URL comes from the platform, so the quick
+    # tunnel, the browser launch and the local-only port scan are all skipped.
+    if IS_CLOUD and not args.cloud:
+        args.cloud = True
+    if args.cloud:
+        args.cloud = True
+        args.host = args.host or cloud_bind_host()
+        args.no_tunnel = True
+        args.no_browser = True
+        args.port = cloud_port(args.port)
 
     if args.ensure_cloudflared or args.download_cloudflared:
         setup_logging(args.verbose)
