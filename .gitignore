@@ -3,6 +3,11 @@ logs/
 downloads/*
 !downloads/.gitkeep
 
+# Secrets (Neon endpoints / object storage keys / database URL) never in git
+.env
+.env.*
+!.env.example
+
 # Python
 __pycache__/
 *.py[cod]

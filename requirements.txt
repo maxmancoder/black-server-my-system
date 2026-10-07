@@ -1,5 +1,9 @@
 # Render keeps the process alive by routing traffic to $PORT; server.py
 # detects RENDER and switches to headless mode (no tunnel, no browser).
-# This project only uses the Python standard library, so there are no
-# third-party packages to install - the file exists so Render's Python
-# build step finds a requirements file.
+#
+# Storage lives in Neon only:
+#   * boto3   -> Neon Object Storage (S3-compatible, path-style addressing)
+#   * psycopg -> Neon Postgres (file metadata)
+# No other cloud service and no server disk is used for storing files.
+boto3>=1.34
+psycopg[binary]>=3.1

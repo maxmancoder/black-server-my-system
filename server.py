@@ -1,32 +1,45 @@
 #!/usr/bin/env python3
 """Public File Download Server for Windows.
 
-Serves the contents of ``./downloads`` over HTTP, bound to ``127.0.0.1`` only,
-and publishes it to the internet through a Cloudflare Quick Tunnel
-(``cloudflared``).
+Serves files over HTTP, bound to ``127.0.0.1`` only, and publishes it to the
+internet through a Cloudflare Quick Tunnel (``cloudflared``).
 
-Architecture::
+Storage lives in **Neon** and nowhere else:
 
     Internet
        |
        v
-    Cloudflare Quick Tunnel   (cloudflared)
+    Cloudflare Quick Tunnel   (cloudflared, local publishing only)
        |
        v
     127.0.0.1:<port>          (this file server)
        |
        v
-    ./downloads/
+    Neon Object Storage       (file bytes, S3-compatible, path-style)
+    Neon Postgres             (file metadata)
 
-The whole program relies on the Python standard library only.  It works as a
-small orchestrator: it starts the local file server in a background thread,
-spawns ``cloudflared`` as a child process, captures its output, extracts the
-public ``https://*.trycloudflare.com`` URL and prints a clear banner.
+``neon_store`` owns the Neon plumbing: uploaded bytes go to Object Storage and
+the metadata row (key, name, size, type, created date, user) goes to Postgres.
+Downloads are handed out as short-lived ``generate_presigned_url`` links, so the
+bytes never travel through this process.  Nothing is written to server disk in
+Neon mode.
+
+When no Neon environment variables are configured the server keeps its original
+local behaviour and serves ``./downloads`` from disk, which is what the test
+suite and the desktop workflow use.  On a PaaS host a half-configured Neon
+environment is a hard error instead of a silent fallback, so the cloud
+deployment can never quietly start writing to an ephemeral disk.
+
+The HTTP layer needs only the standard library; Neon support adds the
+``boto3`` / ``psycopg`` requirements.  The program works as a small orchestrator:
+it starts the local file server in a background thread, spawns ``cloudflared``
+as a child process, captures its output, extracts the public
+``https://*.trycloudflare.com`` URL and prints a clear banner.
 
 The design keeps the tunneling layer isolated (:class:`CloudflareTunnel`) so
 that switching to a *named / managed* Cloudflare Tunnel later (for a custom
-domain such as ``files.example.com``) only requires changing the command that
-is launched, not the rest of the project.
+domain such as ``files.example.com``) only requires changing the command that is
+launched, not the rest of the project.
 """
 
 from __future__ import annotations
@@ -46,6 +59,7 @@ import socket
 import socketserver
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -58,6 +72,11 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional, Tuple
+
+try:  # Neon storage extras (boto3 + psycopg); absent -> local disk mode
+    import neon_store as neon
+except Exception:  # noqa: BLE001 - never block startup on the optional backend
+    neon = None
 
 # ---------------------------------------------------------------------------
 # Paths and constants (everything is relative to the project directory, so the
@@ -102,6 +121,45 @@ _JOBS: dict = {}
 _JOBS_LOCK = threading.Lock()
 _SIDEBAR_CACHE: dict = {"html": None, "ts": 0.0, "for": None}
 _SIDEBAR_TTL = 4.0
+
+# Neon storage backend (bytes in Object Storage, metadata in Postgres).
+# Resolved once on first use; ``None`` means "serve ./downloads from disk".
+_STORAGE = None
+_STORAGE_READY = False
+_STORAGE_LOCK = threading.Lock()
+
+
+def storage():
+    """Return the Neon backend, or ``None`` when it is not configured.
+
+    A partially configured environment is fatal on a PaaS host (the cloud
+    deployment must never silently fall back to an ephemeral disk) and a loud
+    warning locally, where the disk backend is still a valid dev mode.
+    """
+    global _STORAGE, _STORAGE_READY
+    if neon is None or _STORAGE_READY:
+        return _STORAGE
+    with _STORAGE_LOCK:
+        if not _STORAGE_READY:
+            try:
+                _STORAGE = neon.get_store()
+            except Exception as exc:  # noqa: BLE001 - surfaced, never swallowed
+                if PAAS:
+                    raise
+                logging.getLogger("public-download-server").warning(
+                    "Neon storage unavailable (%s); serving from local disk.", exc
+                )
+                _STORAGE = None
+            _STORAGE_READY = True
+    return _STORAGE
+
+
+def storage_active() -> bool:
+    """True when files live in Neon rather than on local disk."""
+    try:
+        return storage() is not None
+    except Exception:  # noqa: BLE001
+        return False
 
 # Official, always-latest Cloudflare release asset for 64-bit Windows.
 CLOUDFLARED_DOWNLOAD_URL: str = (
@@ -246,6 +304,22 @@ def _folder_stats(folder: Path, *, max_depth: int = 6, max_files: int = 20000):
         except OSError:
             continue
     return count, total
+
+
+def folder_stat(rel: str):
+    """Neon metadata row for a relative path, or ``None`` in disk mode."""
+    store = storage()
+    if store is None:
+        return None
+    return store.entry("/" + str(rel).strip("/"))
+
+
+def sidebar_folders(store) -> list[tuple[str, str]]:
+    """Every folder as ``(name, rel_path)``, used to build the sidebar tree."""
+    return [
+        (path.rstrip("/").rsplit("/", 1)[-1] or "/", path)
+        for path in store.sidebar_paths()
+    ]
 
 
 def is_process_running(pid: int) -> bool:
@@ -872,6 +946,7 @@ def _perm_string(path: Path) -> str:
 
 def _sidebar_tree(current: Path) -> str:
     """Build the nested folder tree for the left sidebar (cached, no repeated resolve)."""
+    store = storage()
     root = DOWNLOADS_DIR.resolve()
     try:
         cur = str(current.resolve())
@@ -880,6 +955,68 @@ def _sidebar_tree(current: Path) -> str:
     now = time.time()
     if _SIDEBAR_CACHE["html"] is not None and now - _SIDEBAR_CACHE["ts"] < _SIDEBAR_TTL and _SIDEBAR_CACHE["for"] == cur:
         return _SIDEBAR_CACHE["html"]
+
+    if store is not None:
+        # Neon mode: the folder list comes from Postgres, never from disk.
+        cur_rel = "/" + current.relative_to(root).as_posix().lstrip("./")
+        folders = sidebar_folders(store)
+        nodes: dict[str, list] = {}
+
+        def children_of(rel: str) -> list[tuple[str, str]]:
+            prefix = rel.rstrip("/") + "/"
+            return sorted(
+                (
+                    (name, path)
+                    for name, path in folders
+                    if path.startswith(prefix) and "/" not in path[len(prefix):]
+                ),
+                key=lambda item: item[0].lower(),
+            )
+
+        def render(rel: str) -> str:
+            parts = []
+            for name, path in children_of(rel):
+                href = path.rstrip("/") + "/"
+                is_self = cur_rel == href
+                under = cur_rel.startswith(href)
+                cls = " active" if is_self else ""
+                open_cls = " open" if under else ""
+                current_cls = " current" if is_self else ""
+                kids = render(href)
+                chev = (
+                    '<button type="button" class="tchev" aria-label="Toggle" '
+                    'onclick="toggleTNode(event, this)">&#9654;</button>'
+                    if kids
+                    else '<span class="tchev empty"></span>'
+                )
+                parts.append(
+                    f'<div class="tnode{open_cls}{current_cls}">'
+                    f'<div class="trow">{chev}'
+                    f'<a class="tlink{cls}" href="{html.escape(href)}">'
+                    f'<span class="tfolder"></span>'
+                    f'<span class="tname">{html.escape(name)}</span></a></div>'
+                    f"{kids}</div>"
+                )
+            return f'<div class="tkids">{"".join(parts)}</div>' if parts else ""
+
+        children = render("/")
+        root_current = " current" if cur_rel == "/" else ""
+        root_chev = (
+            '<button type="button" class="tchev" aria-label="Toggle" '
+            'onclick="toggleTNode(event, this)">&#9654;</button>'
+            if children
+            else '<span class="tchev empty"></span>'
+        )
+        html_out = (
+            f'<div class="tnode open{root_current}">'
+            f'<div class="trow">{root_chev}'
+            f'<a class="tlink" href="/">'
+            '<span class="tfolder root"></span>'
+            '<span class="tname">/</span></a></div>'
+            f"{children}</div>"
+        )
+        _SIDEBAR_CACHE.update({"html": html_out, "ts": now, "for": cur})
+        return html_out
 
     def walk(directory: Path, dir_abs: str) -> str:
         try:
@@ -974,6 +1111,20 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
         logger.info("%s - %s", self._client_ip(), fmt % args)
 
     # -- path resolution --------------------------------------------------
+    def _request_rel(self) -> str:
+        """URL path as a storage-relative key (``""`` for the root).
+
+        Percent-decoded and traversal-free, so it is safe to use as an object
+        key: ``..`` segments are dropped rather than escaping the bucket.
+        """
+        raw = urllib.parse.urlparse(self.path).path
+        if neon is not None:
+            return neon.key_from_url(raw)
+        return "/".join(
+            p for p in urllib.parse.unquote(raw).replace("\\", "/").split("/")
+            if p not in ("", ".", "..")
+        )
+
     def _resolve_path(self) -> Optional[Path]:
         """Map the request path to a real path inside ``downloads``."""
         root = DOWNLOADS_DIR.resolve()
@@ -1062,11 +1213,36 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
         path = self._resolve_path()
         if path is None:
             return None
+        store = storage()
+        if store is not None:
+            # Neon mode: the folder tree lives in Postgres, not on disk, so ask
+            # the metadata store instead of stat()ing a path that is not there.
+            rel = self._rel_of(path)
+            if rel and not store.exists(rel):
+                rel = rel.rsplit("/", 1)[0]
+            if rel and not store.exists(rel):
+                return None
+            if self._is_hidden(path):
+                return None
+            return DOWNLOADS_DIR / rel if rel else DOWNLOADS_DIR
         if path.is_file():
             path = path.parent
         if not path.is_dir() or self._is_hidden(path):
             return None
         return path
+
+    @staticmethod
+    def _rel_of(path: Path) -> str:
+        """Path under ``downloads`` as a storage key (``""`` for the root)."""
+        try:
+            return path.resolve().relative_to(DOWNLOADS_DIR.resolve()).as_posix()
+        except (OSError, ValueError):
+            return ""
+
+    def _join_rel(self, directory: Path, name: str) -> str:
+        """Storage key for *name* inside *directory*."""
+        base = self._rel_of(directory)
+        return f"{base}/{name}" if base else name
 
     # -- POST: upload / mkdir / create ------------------------------------
     def do_POST(self):  # noqa: N802
@@ -1096,11 +1272,26 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
             return self._handle_save()
         self._json_response(HTTPStatus.NOT_FOUND, {"ok": False, "error": "unknown route"})
 
+    def _current_user(self) -> str:
+        """Best-effort owner name for the metadata row (never trusted for auth)."""
+        raw = (
+            self.headers.get("X-User")
+            or urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("user", [""])[0]
+        )
+        name = re.sub(r"[^\w.@+-]", "", str(raw or "").strip())[:64]
+        if name:
+            return name
+        store = storage()
+        return (store.default_user if store is not None else "anonymous")
+
     def _handle_upload(self):
         target = self._target_dir()
         if target is None:
             self._json_response(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad directory"})
             return
+        store = storage()
+        target_rel = self._rel_of(target) if store is not None else ""
+        user = self._current_user()
         ctype = self.headers.get("Content-Type", "")
         if "multipart/form-data" not in ctype:
             self._json_response(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "expected multipart"})
@@ -1160,14 +1351,19 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
             safe = self._safe_name(Path(fname).name, allow_basename=True)
             if not safe:
                 return False
-            dest = target / safe
             try:
-                state["cur_fp"] = open(dest, "wb")
+                if store is not None:
+                    # Neon: spool this part, then push it to Object Storage and
+                    # record its metadata row when the part is closed.
+                    key = store.child_key(target_rel, safe)
+                    state["cur_fp"] = neon.ObjectPart(store, key, safe, user)
+                else:
+                    state["cur_fp"] = open(target / safe, "wb")
             except OSError as exc:
                 logger.warning("upload open failed for %s: %s", safe, exc)
                 return False
             state["cur_name"] = safe
-            state["cur_path"] = dest
+            state["cur_path"] = target / safe
             return True
 
         def process_buf(final: bool = False):
@@ -1311,9 +1507,17 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
             state["buf"] += chunk
             process_buf(final=False)
 
-        self._read_body_stream(on_chunk, chunk_size=UPLOAD_CHUNK)
-        process_buf(final=True)
-        _close_current()
+        try:
+            self._read_body_stream(on_chunk, chunk_size=UPLOAD_CHUNK)
+            process_buf(final=True)
+            _close_current()
+        except Exception as exc:  # noqa: BLE001 - storage/network failure
+            _close_current()
+            logger.exception("upload failed")
+            self._json_response(
+                HTTPStatus.BAD_GATEWAY, {"ok": False, "error": f"storage error: {exc}"}
+            )
+            return
 
         if not saved:
             self._json_response(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "no file received"})
@@ -1337,6 +1541,21 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
             self._json_response(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid folder name"})
             return
         dest = target / name
+        store = storage()
+        if store is not None:
+            rel = self._join_rel(target, name)
+            if not store.exists(rel):
+                try:
+                    store.record_dir(rel, user=self._current_user())
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("mkdir failed")
+                    self._json_response(
+                        HTTPStatus.BAD_GATEWAY, {"ok": False, "error": f"storage error: {exc}"}
+                    )
+                    return
+                logger.info("Created folder %s in %s", name, target)
+            self._json_response(HTTPStatus.OK, {"ok": True, "name": name})
+            return
         if dest.exists():
             self._json_response(HTTPStatus.CONFLICT, {"ok": False, "error": "already exists"})
             return
@@ -1368,6 +1587,27 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
             self._json_response(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid file name"})
             return
         dest = target / name
+        store = storage()
+        if store is not None:
+            rel = self._join_rel(target, name)
+            try:
+                key = store.child_key(self._rel_of(target), name)
+                # An empty placeholder object, so the download link resolves.
+                store.put_object(key, b"", content_type=neon.guess_content_type(name))
+                store.record_file(
+                    key, name=name, size=0,
+                    content_type=neon.guess_content_type(name),
+                    user=self._current_user(),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("create failed")
+                self._json_response(
+                    HTTPStatus.BAD_GATEWAY, {"ok": False, "error": f"storage error: {exc}"}
+                )
+                return
+            logger.info("Created file %s in %s", name, target)
+            self._json_response(HTTPStatus.OK, {"ok": True, "name": name, "key": rel})
+            return
         if dest.exists():
             self._json_response(HTTPStatus.CONFLICT, {"ok": False, "error": "already exists"})
             return
@@ -1430,6 +1670,27 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
             self._json_response(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad directory"})
             return
         payload = self._payload()
+        store = storage()
+        if store is not None:
+            name = self._safe_name(str(payload.get("name", "")))
+            if not name:
+                self._json_response(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid name"})
+                return
+            try:
+                found, _was_dir = store.delete_entry(self._join_rel(target, name))
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("delete failed")
+                self._json_response(
+                    HTTPStatus.BAD_GATEWAY, {"ok": False, "error": f"storage error: {exc}"}
+                )
+                return
+            if not found:
+                self._json_response(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
+                return
+            _SIDEBAR_CACHE.update({"html": None, "ts": 0.0, "for": None})
+            logger.info("Deleted %s from Neon", name)
+            self._json_response(HTTPStatus.OK, {"ok": True, "name": name})
+            return
         item = self._item_in(target, str(payload.get("name", "")))
         if item is None or not item.exists():
             self._json_response(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
@@ -1448,7 +1709,20 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
         logger.info("Deleted %s", item)
         self._json_response(HTTPStatus.OK, {"ok": True, "name": item.name})
 
+    def _neon_unsupported(self, operation: str):
+        """Refuse a disk-only operation instead of quietly writing to disk."""
+        self._json_response(
+            HTTPStatus.NOT_IMPLEMENTED,
+            {
+                "ok": False,
+                "error": f"{operation} is not available on Neon storage yet",
+                "storage": "neon",
+            },
+        )
+
     def _handle_rename(self):
+        if storage() is not None:
+            return self._neon_unsupported("rename")
         target = self._target_dir()
         if target is None:
             self._json_response(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad directory"})
@@ -1478,6 +1752,8 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
         self._json_response(HTTPStatus.OK, {"ok": True, "name": new_name})
 
     def _handle_move(self):
+        if storage() is not None:
+            return self._neon_unsupported("move")
         target = self._target_dir()
         if target is None:
             self._json_response(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad directory"})
@@ -1538,6 +1814,8 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
         self._json_response(HTTPStatus.OK, {"ok": True, "pending": True, "job": job_id, "name": item.name})
 
     def _handle_copy(self):
+        if storage() is not None:
+            return self._neon_unsupported("copy")
         target = self._target_dir()
         if target is None:
             self._json_response(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad directory"})
@@ -1634,6 +1912,19 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
         if not q:
             self._json_response(HTTPStatus.OK, {"ok": True, "results": []})
             return
+        store = storage()
+        if store is not None:
+            try:
+                results = store.search(q)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("search failed")
+                self._json_response(
+                    HTTPStatus.BAD_GATEWAY, {"ok": False, "error": f"storage error: {exc}"}
+                )
+                return
+            logger.info("Search %r -> %d results (Neon)", q, len(results))
+            self._json_response(HTTPStatus.OK, {"ok": True, "results": results})
+            return
         root = DOWNLOADS_DIR.resolve()
         results = []
         max_results = 300
@@ -1672,6 +1963,18 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
 
     def _handle_tree(self):
         """JSON tree of all folders under downloads (for move/copy dest picker)."""
+        store = storage()
+        if store is not None:
+            try:
+                tree = store.tree()
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("tree failed")
+                self._json_response(
+                    HTTPStatus.BAD_GATEWAY, {"ok": False, "error": f"storage error: {exc}"}
+                )
+                return
+            self._json_response(HTTPStatus.OK, {"ok": True, "tree": tree})
+            return
         root = DOWNLOADS_DIR.resolve()
 
         def walk(directory: Path) -> dict:
@@ -1695,18 +1998,188 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
 
         self._json_response(HTTPStatus.OK, {"ok": True, "tree": walk(root)})
 
+    def _send_head_neon(self, raw_path: str, query: dict, store):
+        """Serve a request out of Neon instead of local disk.
+
+        Files are handed to the browser as short-lived presigned links, so the
+        bytes stream straight from Object Storage to the client and never pass
+        through this process.
+        """
+        rel = neon.key_from_url(raw_path)
+
+        if not rel:
+            # Root folder: keep the trailing slash so relative links resolve.
+            if not raw_path.endswith("/"):
+                return self._redirect(raw_path + "/")
+            return self._neon_listing("", store)
+
+        entry = folder_stat(rel)
+        if entry is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "File not found")
+            return None
+
+        if entry.is_dir:
+            if not raw_path.endswith("/"):
+                return self._redirect(raw_path + "/")
+            if query.get("zip"):
+                return self._send_neon_zip(
+                    store, self._neon_zip_items(store, entry.key),
+                    (entry.name or "downloads") + ".zip",
+                )
+            items_list = query.get("items") or []
+            names = []
+            for v in items_list:
+                names.extend([n for n in str(v).split(",") if n])
+            if names:
+                return self._send_neon_zip(
+                    store, self._neon_zip_items(store, entry.key, names),
+                    (entry.name or "selected") + ".zip",
+                )
+            return self._neon_listing(rel, store)
+
+        if query.get("zip"):
+            return self._send_neon_zip(
+                store, [(entry.name, entry.key)], Path(entry.name).stem + ".zip"
+            )
+
+        # The viewer pages read the file size; give them the metadata we have.
+        self._entry_hint = entry
+        if query.get("edit"):
+            return self._render_editor_from_neon(entry, store)
+        if query.get("inline") or query.get("raw"):
+            ext = Path(entry.name).suffix.lower()
+            img_exts = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".bmp", ".avif"}
+            vid_exts = {".mp4", ".webm", ".ogg", ".ogv", ".mov", ".mkv", ".avi", ".m4v", ".flv", ".wmv"}
+            virtual = DOWNLOADS_DIR / rel
+            if ext in img_exts and not query.get("raw"):
+                return self._render_image_viewer(virtual)
+            if ext in vid_exts and not query.get("raw"):
+                return self._render_video_viewer(virtual)
+
+        try:
+            url = store.download_url(
+                entry.key, filename=entry.name,
+                inline=bool(query.get("inline") or query.get("raw")),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("presign failed for %s", entry.key)
+            self.send_error(HTTPStatus.BAD_GATEWAY, f"storage error: {exc}")
+            return None
+        logger.info("Presigned download for %s", entry.key)
+        return self._redirect(url)
+
+    def _redirect(self, location: str):
+        self.send_response(HTTPStatus.FOUND)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return None
+
+    def _entry_stat(self, path: Path):
+        """Size/mtime for renderers, from Neon metadata when there is no file.
+
+        Returns an object exposing ``st_size``/``st_mtime``, or ``None`` when the
+        path is neither on disk nor known to Neon.
+        """
+        hint = getattr(self, "_entry_hint", None)
+        if hint is not None:
+            return neon.StatLike(st_size=hint.size, st_mtime=hint.mtime)
+        try:
+            return path.stat()
+        except OSError:
+            return None
+
+    def _render_editor_from_neon(self, entry, store):
+        """Text editor over a Neon object: load bytes, save back on POST."""
+        try:
+            body = store.get_object(entry.key)["Body"].read()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("editor load failed for %s", entry.key)
+            self.send_error(HTTPStatus.BAD_GATEWAY, f"storage error: {exc}")
+            return None
+        try:
+            text = body.decode("utf-8")
+        except UnicodeDecodeError:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Not a UTF-8 text file")
+            return None
+        self._entry_hint = entry
+        return self._render_editor_text(text, entry.name, entry.size)
+
+    @staticmethod
+    def _neon_zip_items(store, directory_key: str, names=None) -> list:
+        """``(archive_name, object_key)`` pairs for a folder download.
+
+        *names* limits the archive to a multi-select subset. Arc names are
+        relative to *directory_key*, matching what the disk backend produces.
+        """
+        prefix = str(directory_key or "").strip("/")
+        out: list = []
+        if names is None:
+            for full, key in store.walk_files(prefix):
+                rel = full[len(prefix) + 1:] if prefix and full.startswith(prefix + "/") else full
+                if any(part.startswith(".") for part in rel.split("/")):
+                    continue  # hidden entries stay out, same as the disk backend
+                out.append((rel, key))
+            return out
+        children = {c.name: c for c in store.list_dir("/" + prefix if prefix else "/")}
+        for name in names:
+            child = children.get(name)
+            if child is None or name.startswith("."):
+                continue
+            if child.is_dir:
+                sub = child.key.rstrip("/")
+                for full, key in store.walk_files(sub):
+                    rel = full[len(sub) + 1:] if sub and full.startswith(sub + "/") else full
+                    if any(part.startswith(".") for part in rel.split("/")):
+                        continue
+                    out.append((f"{name}/{rel}", key))
+            else:
+                out.append((name, child.key))
+        return out
+
+    def _send_neon_zip(self, store, items, zip_name: str):
+        """Stream a ZIP built from *items* straight from Object Storage."""
+        spool = tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024)
+        try:
+            with zipfile.ZipFile(spool, "w", zipfile.ZIP_DEFLATED) as zf:
+                for arcname, key in items:
+                    zf.writestr(arcname, store.get_object(key)["Body"].read())
+            spool.seek(0)
+            payload = spool.read()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("zip failed for %s", zip_name)
+            self.send_error(HTTPStatus.BAD_GATEWAY, f"storage error: {exc}")
+            return None
+        finally:
+            spool.close()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition", self._content_disposition(zip_name))
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(payload)
+        return None
+
+    def _neon_listing(self, rel: str, store):
+        """Render a folder listing from Postgres metadata."""
+        return self.list_directory(str(DOWNLOADS_DIR / rel if rel else DOWNLOADS_DIR))
+
     # -- request handling -------------------------------------------------
     def send_head(self):
         raw_path = urllib.parse.urlparse(self.path).path
         if raw_path in ("/favicon.ico", "/favicon.png"):
             return self._send_favicon()
 
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        store = storage()
+        if store is not None:
+            return self._send_head_neon(raw_path, query, store)
+
         path = self._resolve_path()
         if path is None or not path.exists() or self._is_hidden(path):
             self.send_error(HTTPStatus.NOT_FOUND, "File not found")
             return None
-
-        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
 
         if path.is_dir():
             # Redirect directory requests without a trailing slash so relative
@@ -1751,9 +2224,8 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
 
     def _render_video_viewer(self, path: Path):
         """Serve a fullscreen video player page fitted to the screen."""
-        try:
-            st = path.stat()
-        except OSError:
+        st = self._entry_stat(path)
+        if st is None:
             self.send_error(HTTPStatus.NOT_FOUND, "File not found")
             return None
         name = html.escape(path.name)
@@ -1851,9 +2323,8 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
 
     def _render_image_viewer(self, path: Path):
         """Serve an image viewer page with a top download button."""
-        try:
-            st = path.stat()
-        except OSError:
+        st = self._entry_stat(path)
+        if st is None:
             self.send_error(HTTPStatus.NOT_FOUND, "File not found")
             return None
         name = html.escape(path.name)
@@ -1980,11 +2451,14 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND, "Cannot read file")
             return None
         size = path.stat().st_size if path.exists() else 0
+        return self._render_editor_text(text, path.name, size)
+
+    def _render_editor_text(self, text: str, raw_name: str, size: int = 0):
+        """Render the editor for already-loaded *text* (disk or Neon)."""
         if size > 5 * 1024 * 1024:
             self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "File too large to edit")
             return None
-        name = html.escape(path.name)
-        raw_name = path.name
+        name = html.escape(raw_name)
         esc_text = html.escape(text)
         theme = "dark"
         page = (
@@ -2175,9 +2649,22 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
             self._json_response(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "file too large"})
             return
         try:
-            path.write_bytes(data)
-        except OSError as exc:
-            self._json_response(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(exc)})
+            store = storage()
+            if store is not None:
+                key = store.child_key(self._rel_of(path.parent), path.name)
+                store.put_object(key, data, content_type=neon.guess_content_type(path.name))
+                store.record_file(
+                    key, name=path.name, size=len(data),
+                    content_type=neon.guess_content_type(path.name),
+                    user=self._current_user(),
+                )
+            else:
+                path.write_bytes(data)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("save failed")
+            self._json_response(
+                HTTPStatus.BAD_GATEWAY, {"ok": False, "error": f"storage error: {exc}"}
+            )
             return
         logger.info("Saved %s (%d bytes)", path, len(data))
         self._json_response(HTTPStatus.OK, {"ok": True, "name": path.name, "size": len(data)})
@@ -2342,34 +2829,55 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
 
     # -- directory listing -------------------------------------------------
     def list_directory(self, path):
-        try:
-            raw_entries = os.listdir(path)
-        except OSError:
-            self.send_error(HTTPStatus.NOT_FOUND, "No permission to list directory")
-            return None
-
-        # Hide dot-files from the public listing.
-        raw_entries = [name for name in raw_entries if not name.startswith(".")]
-
         root = DOWNLOADS_DIR.resolve()
         current = Path(path)
+        store = storage()
 
-        def _entry_sort_key(name: str):
+        if store is not None:
+            # Neon mode: entries come from Postgres metadata, not from disk.
             try:
-                is_dir = (current / name).is_dir()
+                display_path = "/" + current.resolve().relative_to(root).as_posix().lstrip("./")
+            except (OSError, ValueError):
+                display_path = "/"
+            if display_path == "/.":
+                display_path = "/"
+            try:
+                children = store.list_dir(display_path)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("listing failed for %s", display_path)
+                self.send_error(HTTPStatus.BAD_GATEWAY, f"storage error: {exc}")
+                return None
+            # Keep plain names for the row builder; metadata rides along with it.
+            info_by_name = {e.name: e for e in children}
+            entries = sorted(
+                (name for name in info_by_name if not name.startswith(".")),
+                key=lambda n: (0 if info_by_name[n].is_dir else 1, n.lower()),
+            )
+        else:
+            try:
+                raw_entries = os.listdir(path)
             except OSError:
-                is_dir = False
-            return (0 if is_dir else 1, name.lower())
+                self.send_error(HTTPStatus.NOT_FOUND, "No permission to list directory")
+                return None
+            # Hide dot-files from the public listing.
+            raw_entries = [name for name in raw_entries if not name.startswith(".")]
+            info_by_name = {}
 
-        # Folders always first, then files (each group A→Z).
-        entries = sorted(raw_entries, key=_entry_sort_key)
+            def _entry_sort_key(name: str):
+                try:
+                    is_dir = (current / name).is_dir()
+                except OSError:
+                    is_dir = False
+                return (0 if is_dir else 1, name.lower())
 
-        display_path = "/" + current.relative_to(root).as_posix().lstrip("./")
-        if display_path == "/.":
-            display_path = "/"
+            # Folders always first, then files (each group A→Z).
+            entries = sorted(raw_entries, key=_entry_sort_key)
+            display_path = "/" + current.relative_to(root).as_posix().lstrip("./")
+            if display_path == "/.":
+                display_path = "/"
 
         tree_html = _sidebar_tree(current)
-        has_parent = current != root
+        has_parent = display_path != "/"
 
         rows = []
         first_file_json = "null"
@@ -2397,19 +2905,29 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
             full = current / name
             link = urllib.parse.quote(name, safe="")
             label = html.escape(name)
-            try:
-                st = full.stat()
-                mtime = st.st_mtime
-                size_b = st.st_size
-            except OSError:
-                mtime = 0.0
-                size_b = 0
+            info = info_by_name.get(name)
+            if info is not None:
+                is_dir = info.is_dir
+                mtime = info.mtime
+                size_b = info.size
+            else:
+                is_dir = full.is_dir()
+                try:
+                    st = full.stat()
+                    mtime = st.st_mtime
+                    size_b = st.st_size
+                except OSError:
+                    mtime = 0.0
+                    size_b = 0
 
-            if full.is_dir():
+            if is_dir:
                 href = link + "/"
-                dir_files, dir_bytes = _folder_stats(full)
+                if store is not None:
+                    dir_files, dir_bytes = store.folder_stats(self._rel_of(full))
+                else:
+                    dir_files, dir_bytes = _folder_stats(full)
                 dir_stats = f"{dir_files} files &middot; {human_size(dir_bytes)}"
-                perms = _perm_string(full)
+                perms = "drwxr-xr-x" if store is not None else _perm_string(full)
                 rel_path = (display_path.rstrip("/") + "/" + name) if display_path != "/" else "/" + name
                 meta = json.dumps({
                     "name": name,
@@ -2460,7 +2978,7 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
                 badge = _file_badge(ext)
                 size_str = human_size(size_b)
                 type_label = (ext.lstrip(".") + " file") if ext else "file"
-                perms = _perm_string(full)
+                perms = "rw-r--r--" if store is not None else _perm_string(full)
                 rel_path = (display_path.rstrip("/") + "/" + name) if display_path != "/" else "/" + name
                 meta = json.dumps({
                     "name": name,
@@ -5824,6 +6342,20 @@ def run(args: argparse.Namespace) -> int:
     if not DOWNLOADS_DIR.is_dir():
         print(f"[ERROR] downloads directory is missing: {DOWNLOADS_DIR}")
         return 1
+
+    # Resolve the storage backend up front: on a PaaS host a half-written
+    # configuration must stop the boot here, not on the first upload.
+    if neon is not None:
+        try:
+            store = storage()
+        except Exception as exc:  # noqa: BLE001 - already fatal, reported below
+            print(f"[ERROR] storage backend unavailable: {exc}")
+            return 1
+        if store is not None:
+            print(f"[OK] Storage backend: Neon Object Storage + Postgres "
+                  f"(bucket={store.bucket})")
+        else:
+            print("[i] Storage backend: local disk (Neon not configured).")
 
     # Prevent duplicate instances (irrelevant in the cloud: one process per box).
     lock_acquired = False
