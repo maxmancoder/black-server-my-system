@@ -3300,15 +3300,15 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
     background: var(--panel3);
   }}
   .scope-menu {{
-    position: absolute; right: 0; top: calc(100% + 8px);
-    min-width: 230px; z-index: 200;
+    position: absolute; left: 0; right: 0; top: calc(100% + 6px);
+    width: auto; max-width: 100%; z-index: 131;
     background: var(--glass-bg); border: 1px solid var(--border2);
     border-radius: 14px; overflow: hidden;
     box-shadow: 0 16px 48px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.06);
     backdrop-filter: blur(24px) saturate(1.3);
     -webkit-backdrop-filter: blur(24px) saturate(1.3);
     display: none;
-    transform-origin: top right;
+    transform-origin: top left;
     animation: scopePop .16s cubic-bezier(.16,1,.3,1);
   }}
   .scope-menu.open {{ display: block; }}
@@ -3317,9 +3317,9 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
     to {{ opacity: 1; transform: translateY(0) scale(1); }}
   }}
   .scope-menu button {{
-    display: flex; align-items: center; gap: 10px;
+    display: flex; align-items: center; gap: 9px;
     width: 100%; text-align: right;
-    padding: 11px 14px; border: none; background: transparent;
+    padding: 10px 12px; border: none; background: transparent;
     color: var(--text2); cursor: pointer;
     transition: background .12s, color .12s;
   }}
@@ -4379,6 +4379,10 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
     body {{ padding: 8px; }}
     .app-head {{ flex-direction: column; gap: 10px; align-items: flex-start; }}
     .top-right .machine .mtext {{ display: none; }}
+    .scope-menu button {{ padding: 9px 10px; gap: 8px; }}
+    .scope-menu .sm-icon {{ width: 28px; height: 28px; font-size: 14px; }}
+    .scope-menu .sm-desc {{ display: none; }}
+    .scope-menu .sm-title {{ font-size: 12.5px; }}
     .center {{
       height: calc(100dvh - 90px);
       max-height: calc(100dvh - 90px);
@@ -4402,26 +4406,26 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
     <div class="search-scope" id="searchScope" title="Search scope">
       <button type="button" class="scope-dots" id="scopeDots" aria-label="Search scope menu"
               onclick="toggleScopeMenu(event)">&#8942;</button>
-      <div class="scope-menu" id="scopeMenu" role="menu">
-        <button type="button" class="on" data-scope="local" role="menuitem"
-                onclick="setSearchScope('local')">
-          <span class="sm-icon">&#128193;</span>
-          <span class="sm-text">
-            <span class="sm-title">سرچ در این پوشه</span>
-            <span class="sm-desc">فقط مسیر فعلی را جستجو کن</span>
-          </span>
-          <span class="sm-check">&#10003;</span>
-        </button>
-        <button type="button" data-scope="server" role="menuitem"
-                onclick="setSearchScope('server')">
-          <span class="sm-icon">&#127760;</span>
-          <span class="sm-text">
-            <span class="sm-title">سرچ در کل سرور</span>
-            <span class="sm-desc">همه پوشه‌ها و فایل‌ها</span>
-          </span>
-          <span class="sm-check">&#10003;</span>
-        </button>
-      </div>
+    </div>
+    <div class="scope-menu" id="scopeMenu" role="menu">
+      <button type="button" class="on" data-scope="local" role="menuitem"
+              onclick="setSearchScope('local')">
+        <span class="sm-icon">&#128193;</span>
+        <span class="sm-text">
+          <span class="sm-title">سرچ در این پوشه</span>
+          <span class="sm-desc">فقط مسیر فعلی را جستجو کن</span>
+        </span>
+        <span class="sm-check">&#10003;</span>
+      </button>
+      <button type="button" data-scope="server" role="menuitem"
+              onclick="setSearchScope('server')">
+        <span class="sm-icon">&#127760;</span>
+        <span class="sm-text">
+          <span class="sm-title">سرچ در کل سرور</span>
+          <span class="sm-desc">همه پوشه‌ها و فایل‌ها</span>
+        </span>
+        <span class="sm-check">&#10003;</span>
+      </button>
     </div>
   </div>
   <div class="top-right">
