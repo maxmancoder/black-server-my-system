@@ -96,12 +96,45 @@ PORT_SCAN_LIMIT: int = 20        # how many ports to try after the default one
 CHUNK_SIZE: int = 256 * 1024     # streaming chunk size (keeps RAM usage flat)
 UPLOAD_CHUNK: int = 512 * 1024   # larger reads while receiving uploads
 
-# Resumable uploads: the browser splits a file into parts of this size and sends
-# them one request at a time, so pausing only loses the part in flight. 8 MiB is
-# comfortably above the 5 MiB minimum that S3-style multipart APIs require.
-UPLOAD_PART: int = 8 * 1024 * 1024
+# Resumable uploads: the browser splits a file into parts and sends them one
+# request at a time, so pausing only loses the part in flight. Part size follows
+# the file size (see ``upload_part_size``) to balance request count against how
+# much progress a pause can throw away.
 UPLOAD_PART_SPILL: int = 4 * 1024 * 1024   # spool this many bytes in RAM per part
 UPLOAD_SESSION_TTL: float = 24 * 3600.0     # drop forgotten sessions after a day
+
+# S3-style object stores reject any part below 5 MiB unless it is the last one,
+# which caps how finely a small file may be split.
+MIN_UPLOAD_PART: int = 5 * 1024 * 1024
+
+# Upper bound of each size tier (inclusive) and the part size to use inside it.
+UPLOAD_PART_TIERS: tuple = (
+    (8 * 1024 * 1024, 2 * 1024 * 1024),
+    (30 * 1024 * 1024, 8 * 1024 * 1024),
+    (100 * 1024 * 1024, 15 * 1024 * 1024),
+    (300 * 1024 * 1024, 50 * 1024 * 1024),
+)
+UPLOAD_PART_TOP: int = 100 * 1024 * 1024    # part size above the last tier
+
+
+def upload_part_size(size: int) -> int:
+    """Part size for a file of *size* bytes.
+
+    Small files get small parts so a pause does not lose much, large files get
+    big parts so a multi-gigabyte transfer is not thousands of requests. The one
+    place this cannot hold is a file too small to be split legally: object
+    storage refuses parts under 5 MiB, so anything between 2 and 8 MiB is sent
+    in a single piece (a lone part is always allowed, whatever its size).
+    """
+    size = max(0, int(size))
+    want = UPLOAD_PART_TOP
+    for limit, part in UPLOAD_PART_TIERS:
+        if size <= limit:
+            want = part
+            break
+    if want < MIN_UPLOAD_PART and size > want:
+        return size
+    return want
 
 
 def _env_flag(name: str) -> bool:
@@ -145,7 +178,7 @@ _UPLOADS_LOCK = threading.Lock()
 class UploadSession:
     """Server-side state for one resumable (chunked) upload."""
 
-    __slots__ = ("sid", "store", "target", "name", "rel", "user",
+    __slots__ = ("sid", "store", "target", "name", "rel", "user", "chunk",
                  "upload_id", "scratch", "size", "ctype", "parts", "touched")
 
     def __init__(self, sid: str, store, target: Path, name: str, rel: str,
@@ -159,6 +192,7 @@ class UploadSession:
         self.upload_id: str = ""      # provider multipart id (object mode)
         self.scratch: Optional[Path] = None   # partial file (local mode)
         self.size = size              # total expected bytes
+        self.chunk = upload_part_size(size)    # bytes per part, fixed for the session
         self.ctype = ctype
         self.parts: dict = {}         # part index (0-based) -> ETag/size
         self.touched = time.monotonic()
@@ -169,7 +203,16 @@ class UploadSession:
         return self.store.child_key(self.rel, self.name) if self.store else ""
 
     def part_count(self) -> int:
-        return max(1, (self.size + UPLOAD_PART - 1) // UPLOAD_PART)
+        return max(1, (self.size + self.chunk - 1) // self.chunk)
+
+    def part_offset(self, index: int) -> int:
+        """Byte offset of part *index* inside the file."""
+        return index * self.chunk
+
+    def part_length(self, index: int) -> int:
+        """Expected byte length of part *index* (the last one may be short)."""
+        start = self.part_offset(index)
+        return max(0, min(self.chunk, self.size - start))
 
 
 def _upload_session(sid: str) -> Optional[UploadSession]:
@@ -2139,10 +2182,11 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
         self._json_response(HTTPStatus.OK, {"ok": True, "files": saved})
 
     # -- resumable uploads -------------------------------------------------
-    # The browser splits every file into UPLOAD_PART-sized chunks and posts them
-    # one at a time. Nothing is written to the real destination until the last
-    # chunk arrives, so a paused upload never leaves a half-written file behind
-    # and "resume" only re-sends what never made it.
+    # The browser splits every file into parts (sized from the file, see
+    # ``upload_part_size``) and posts them one at a time. Nothing is written to
+    # the real destination until the last part arrives, so a paused upload never
+    # leaves a half-written file behind and "resume" only re-sends what never
+    # made it.
 
     def _handle_upstart(self):
         """Open a session: returns the session id and the negotiated part size."""
@@ -2187,15 +2231,26 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
             _UPLOADS[sid] = sess
         self._json_response(HTTPStatus.OK, {
             "ok": True, "sid": sid, "name": name,
-            "part": UPLOAD_PART, "parts": sess.part_count(),
+            "part": sess.chunk, "parts": sess.part_count(),
         })
 
+    def _up_reject(self, code: HTTPStatus, message: str):
+        """Refuse a part without reading its body.
+
+        The body can be hundreds of megabytes, so draining it just to answer
+        would waste the whole upload. Instead the connection is closed after the
+        reply: a keep-alive socket with an unread body would desynchronise and
+        the next request on it would be parsed as part of this one.
+        """
+        self.close_connection = True
+        self._json_response(code, {"ok": False, "error": message})
+
     def _handle_uppart(self):
-        """Store one chunk. Re-sending the same index simply replaces it."""
+        """Store one part. Re-sending the same index simply replaces it."""
         query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         sess = _upload_session((query.get("sid") or [""])[0])
         if sess is None:
-            self._json_response(HTTPStatus.NOT_FOUND, {"ok": False, "error": "unknown upload"})
+            self._up_reject(HTTPStatus.NOT_FOUND, "unknown upload")
             return
         try:
             index = int((query.get("part") or ["-1"])[0])
@@ -2203,18 +2258,15 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
             index = -1
         total = sess.part_count()
         if index < 0 or index >= total:
-            self._json_response(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad part index"})
+            self._up_reject(HTTPStatus.BAD_REQUEST, "bad part index")
             return
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             length = 0
-        expect = sess.size - index * UPLOAD_PART
-        if expect > UPLOAD_PART:
-            expect = UPLOAD_PART
+        expect = sess.part_length(index)
         if length != expect:
-            self._json_response(HTTPStatus.BAD_REQUEST,
-                                {"ok": False, "error": "part length mismatch"})
+            self._up_reject(HTTPStatus.BAD_REQUEST, "part length mismatch")
             return
 
         # Buffer the chunk, then hand it over in one go: the storage SDKs want a
@@ -2233,8 +2285,9 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
                 etag = sess.store.upload_part(sess.key, sess.upload_id,
                                              index + 1, spool, length)
             else:
+                offset = sess.part_offset(index)
                 with open(sess.scratch, "r+b") as fh:
-                    fh.seek(index * UPLOAD_PART)
+                    fh.seek(offset)
                     remaining = length
                     while remaining > 0:
                         piece = spool.read(min(UPLOAD_CHUNK, remaining))
@@ -2242,7 +2295,13 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
                             break
                         fh.write(piece)
                         remaining -= len(piece)
-                    fh.truncate(index * UPLOAD_PART + (length - remaining))
+                    # Only ever grow the scratch file. Truncating to the end of
+                    # this part would throw away later parts that a resumed
+                    # upload already delivered.
+                    end = offset + (length - remaining)
+                    fh.seek(0, os.SEEK_END)
+                    if fh.tell() < end:
+                        fh.truncate(end)
                 etag = str(length)
         except Exception as exc:  # noqa: BLE001 - storage/network failure
             logger.exception("upload part failed")
@@ -2269,8 +2328,8 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
         total = sess.part_count()
         missing = [i for i in range(total) if i not in sess.parts]
         if missing:
-            _upload_forget(sid)
-            _upload_discard(sess)
+            # Keep the session alive: the client just re-sends the gaps and
+            # calls finish again. Throwing it away here would strand the upload.
             self._json_response(HTTPStatus.BAD_REQUEST, {
                 "ok": False, "error": f"missing {len(missing)} part(s)",
                 "missing": missing[:32],
@@ -2291,6 +2350,11 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
                 dest = sess.target / name
                 if sess.scratch is None or not sess.scratch.exists():
                     raise OSError("scratch file missing")
+                if sess.scratch.stat().st_size != sess.size:
+                    raise OSError(
+                        f"scratch file is {sess.scratch.stat().st_size} B,"
+                        f" expected {sess.size} B"
+                    )
                 os.replace(str(sess.scratch), str(dest))
                 sess.scratch = None
         except Exception as exc:  # noqa: BLE001 - storage/network failure
@@ -6635,6 +6699,7 @@ function upFinish(it) {{
       it.xhr = null;
       var j = _upJson(x);
       if (x.status >= 200 && x.status < 300 && j && j.ok) resolve(j);
+      else if (j && j.missing) resolve(j);      /* caller re-sends those parts */
       else reject({{ message: (j && j.error) || ("HTTP " + x.status) }});
     }};
     x.onerror = function() {{ if (gen === it.gen) {{ it.xhr = null; reject({{ message: "خطای شبکه" }}); }} }};
@@ -6643,7 +6708,7 @@ function upFinish(it) {{
   }});
 }}
 
-/* drive one file from its first chunk to the finish request */
+/* drive one file from its first part to the finish request */
 async function runUpload(it) {{
   it.state = "uploading";
   renderUploads();
@@ -6662,7 +6727,17 @@ async function runUpload(it) {{
       it.acked = Math.min(it.size, (i + 1) * it.partSize);
       renderUploads();
     }}
-    await upFinish(it);
+    /* finish can point at parts it never received; send exactly those again */
+    for (var attempt = 0; attempt < 3; attempt++) {{
+      if (it.state !== "uploading") return;
+      var res = await upFinish(it);
+      if (it.state === "cancelled") return;
+      if (!res || !res.missing || !res.missing.length) break;
+      for (var m = 0; m < res.missing.length; m++) {{
+        if (it.state !== "uploading") return;
+        await upPart(it, res.missing[m]);
+      }}
+    }}
     if (it.state === "cancelled") return;
     it.sid = null;
     it.acked = it.size;
