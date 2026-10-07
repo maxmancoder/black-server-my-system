@@ -1963,6 +1963,11 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
 
     def _handle_tree(self):
         """JSON tree of all folders under downloads (for move/copy dest picker)."""
+        # The body is irrelevant here, but it still has to be drained: bytes
+        # left in the socket are prepended to the next keep-alive request, and
+        # the request line then reads "{}POST ..." which the server rejects
+        # with 501 Unsupported method.
+        self._read_body()
         store = storage()
         if store is not None:
             try:
