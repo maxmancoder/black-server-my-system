@@ -96,6 +96,13 @@ PORT_SCAN_LIMIT: int = 20        # how many ports to try after the default one
 CHUNK_SIZE: int = 256 * 1024     # streaming chunk size (keeps RAM usage flat)
 UPLOAD_CHUNK: int = 512 * 1024   # larger reads while receiving uploads
 
+# Resumable uploads: the browser splits a file into parts of this size and sends
+# them one request at a time, so pausing only loses the part in flight. 8 MiB is
+# comfortably above the 5 MiB minimum that S3-style multipart APIs require.
+UPLOAD_PART: int = 8 * 1024 * 1024
+UPLOAD_PART_SPILL: int = 4 * 1024 * 1024   # spool this many bytes in RAM per part
+UPLOAD_SESSION_TTL: float = 24 * 3600.0     # drop forgotten sessions after a day
+
 
 def _env_flag(name: str) -> bool:
     """True when an environment variable looks like a boolean switch."""
@@ -127,6 +134,77 @@ _SIDEBAR_TTL = 4.0
 _STORAGE = None
 _STORAGE_READY = False
 _STORAGE_LOCK = threading.Lock()
+
+# In-flight resumable uploads. A session owns the destination name, the S3
+# multipart id (object storage) or the scratch file on disk (local mode), plus
+# the parts the client has already acked so "resume" continues where it stopped.
+_UPLOADS: dict = {}
+_UPLOADS_LOCK = threading.Lock()
+
+
+class UploadSession:
+    """Server-side state for one resumable (chunked) upload."""
+
+    __slots__ = ("sid", "store", "target", "name", "rel", "user",
+                 "upload_id", "scratch", "size", "ctype", "parts", "touched")
+
+    def __init__(self, sid: str, store, target: Path, name: str, rel: str,
+                 user: str, size: int, ctype: str) -> None:
+        self.sid = sid
+        self.store = store
+        self.target = target          # directory the file lands in (local mode)
+        self.name = name              # sanitised destination file name
+        self.rel = rel                # storage key prefix (object mode)
+        self.user = user
+        self.upload_id: str = ""      # provider multipart id (object mode)
+        self.scratch: Optional[Path] = None   # partial file (local mode)
+        self.size = size              # total expected bytes
+        self.ctype = ctype
+        self.parts: dict = {}         # part index (0-based) -> ETag/size
+        self.touched = time.monotonic()
+
+    @property
+    def key(self) -> str:
+        """Object key of the finished file (only valid in object mode)."""
+        return self.store.child_key(self.rel, self.name) if self.store else ""
+
+    def part_count(self) -> int:
+        return max(1, (self.size + UPLOAD_PART - 1) // UPLOAD_PART)
+
+
+def _upload_session(sid: str) -> Optional[UploadSession]:
+    """Look up a live session and age out abandoned ones as a side effect."""
+    if not re.fullmatch(r"[0-9a-f]{32}", str(sid or "")):
+        return None
+    now = time.monotonic()
+    with _UPLOADS_LOCK:
+        for dead_sid, dead in list(_UPLOADS.items()):
+            if now - dead.touched > UPLOAD_SESSION_TTL:
+                _UPLOADS.pop(dead_sid, None)
+                _upload_discard(dead)
+        sess = _UPLOADS.get(sid)
+        if sess is not None:
+            sess.touched = now
+        return sess
+
+
+def _upload_forget(sid: str) -> Optional[UploadSession]:
+    with _UPLOADS_LOCK:
+        return _UPLOADS.pop(sid, None)
+
+
+def _upload_discard(sess: UploadSession) -> None:
+    """Best-effort teardown of an unfinished upload (no response is sent)."""
+    if sess.store is not None and sess.upload_id:
+        try:
+            sess.store.abort_multipart(sess.key, sess.upload_id)
+        except Exception:  # noqa: BLE001 - teardown must never raise
+            logger.warning("abort multipart failed for %s", sess.key, exc_info=True)
+    if sess.scratch is not None:
+        try:
+            sess.scratch.unlink()
+        except OSError:
+            pass
 
 
 def storage():
@@ -1079,6 +1157,533 @@ def _sidebar_tree(current: Path) -> str:
     return html_out
 
 
+# Dedicated video player page. Kept as one template so the markup, the styles and
+# the script stay side by side; __NAME__/__SIZE__/__SRC__/__JSON_NAME__ are
+# filled in per request.
+PLAYER_HTML = """<!DOCTYPE html>
+<html lang="fa" dir="ltr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>__NAME__ - Black Server</title>
+<link rel="icon" href="/favicon.ico" sizes="any">
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;width:100%;background:#000;overflow:hidden}
+body{font-family:'Segoe UI',system-ui,-apple-system,'Noto Sans Arabic',sans-serif;color:#e5e7eb;
+  user-select:none;-webkit-user-select:none}
+button{font-family:inherit;color:inherit;background:none;border:none;cursor:pointer}
+
+/* ---------- stage ---------- */
+.stage{position:fixed;inset:0;background:#000;display:flex;align-items:center;
+  justify-content:center;overflow:hidden}
+video{max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;
+  background:#000;outline:none;display:block}
+video.noc{pointer-events:none}
+
+/* soft ambient glow behind the video */
+.glow{position:fixed;inset:0;pointer-events:none;opacity:.5;
+  background:radial-gradient(60% 60% at 50% 45%,rgba(59,130,246,.18),transparent 70%)}
+
+/* ---------- shared chrome ---------- */
+.chrome{position:fixed;left:0;right:0;z-index:20;transition:opacity .28s ease,
+  transform .28s ease, visibility .28s}
+.chrome.hide{opacity:0;visibility:hidden;pointer-events:none}
+.top{top:0;display:flex;align-items:center;gap:10px;padding:12px 14px;
+  padding-top:max(12px,env(safe-area-inset-top));
+  background:linear-gradient(180deg,rgba(0,0,0,.82),rgba(0,0,0,0))}
+.top.hide{transform:translateY(-100%)}
+.back{display:inline-flex;align-items:center;gap:7px;padding:8px 13px;border-radius:10px;
+  border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.07);
+  font-size:13px;font-weight:600;text-decoration:none;color:#f3f4f6;
+  backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);white-space:nowrap}
+.back:hover{background:rgba(255,255,255,.15)}
+.ttitle{flex:1;min-width:0;font-size:13.5px;font-weight:700;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap;text-shadow:0 1px 4px rgba(0,0,0,.6)}
+.tsize{font-size:12px;color:#9ca3af;white-space:nowrap;font-variant-numeric:tabular-nums}
+.dl{display:inline-flex;align-items:center;gap:7px;padding:8px 14px;border-radius:10px;
+  border:none;background:linear-gradient(135deg,#4f8cff,#3b5bfc);color:#fff;font-size:13px;
+  font-weight:700;text-decoration:none;white-space:nowrap;
+  box-shadow:0 4px 18px rgba(59,91,252,.4)}
+.dl:hover{filter:brightness(1.12)}
+
+/* ---------- bottom controls ---------- */
+.bar{bottom:0;padding:26px 16px 14px;padding-bottom:max(14px,env(safe-area-inset-bottom));
+  background:linear-gradient(0deg,rgba(0,0,0,.88),rgba(0,0,0,.55) 55%,rgba(0,0,0,0))}
+.bar.hide{transform:translateY(100%)}
+
+/* seek */
+.seek{position:relative;height:20px;display:flex;align-items:center;cursor:pointer;
+  touch-action:none}
+.track{position:relative;width:100%;height:5px;border-radius:999px;
+  background:rgba(255,255,255,.22);transition:height .15s ease}
+.seek:hover .track,.seek.drag .track{height:8px}
+.buf,.played{position:absolute;left:0;top:0;bottom:0;border-radius:999px;width:0}
+.buf{background:rgba(255,255,255,.34)}
+.played{background:linear-gradient(90deg,#60a5fa,#3b82f6)}
+.knob{position:absolute;top:50%;width:13px;height:13px;border-radius:50%;background:#fff;
+  transform:translate(-50%,-50%) scale(0);transition:transform .15s ease;
+  box-shadow:0 2px 8px rgba(0,0,0,.6);pointer-events:none}
+.seek:hover .knob,.seek.drag .knob{transform:translate(-50%,-50%) scale(1)}
+.tip{position:absolute;bottom:26px;transform:translateX(-50%);padding:4px 8px;border-radius:7px;
+  background:rgba(12,16,26,.94);border:1px solid rgba(255,255,255,.14);font-size:11.5px;
+  font-weight:600;white-space:nowrap;opacity:0;pointer-events:none;
+  font-variant-numeric:tabular-nums;transition:opacity .12s}
+.seek:hover .tip,.seek.drag .tip{opacity:1}
+
+/* button row */
+.row{display:flex;align-items:center;gap:6px;margin-top:6px}
+.ib{display:inline-flex;align-items:center;justify-content:center;width:40px;height:40px;
+  border-radius:11px;color:#e5e7eb;flex-shrink:0;transition:background .15s,transform .12s}
+.ib:hover{background:rgba(255,255,255,.14)}
+.ib:active{transform:scale(.93)}
+.ib svg{width:21px;height:21px;fill:currentColor;pointer-events:none}
+.ib.big{width:46px;height:46px}
+.ib.big svg{width:26px;height:26px}
+.ib.on{color:#60a5fa}
+.spacer{flex:1}
+.time{font-size:12.5px;color:#d1d5db;font-variant-numeric:tabular-nums;
+  white-space:nowrap;padding:0 4px;direction:ltr}
+.time b{color:#fff;font-weight:700}
+
+/* volume */
+.vol{display:flex;align-items:center;gap:2px}
+.vslider{width:0;overflow:hidden;transition:width .2s ease,opacity .2s ease;opacity:0}
+.vol:hover .vslider,.vslider.open{width:88px;opacity:1}
+input[type=range]{-webkit-appearance:none;appearance:none;height:4px;border-radius:999px;
+  background:rgba(255,255,255,.28);outline:none;cursor:pointer}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:13px;height:13px;
+  border-radius:50%;background:#fff;box-shadow:0 1px 5px rgba(0,0,0,.5)}
+input[type=range]::-moz-range-thumb{width:13px;height:13px;border:none;border-radius:50%;
+  background:#fff}
+#vol{width:78px;margin:0 6px}
+
+/* speed menu */
+.menu{position:relative}
+.pop{position:absolute;bottom:calc(100% + 10px);right:0;min-width:104px;padding:6px;
+  border-radius:13px;background:rgba(14,18,28,.96);border:1px solid rgba(255,255,255,.14);
+  box-shadow:0 18px 46px rgba(0,0,0,.6);backdrop-filter:blur(18px);
+  -webkit-backdrop-filter:blur(18px);display:none;z-index:30}
+.pop.open{display:block;animation:pop .14s cubic-bezier(.16,1,.3,1)}
+@keyframes pop{from{opacity:0;transform:translateY(6px) scale(.97)}to{opacity:1;transform:none}}
+.pop button{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;
+  padding:8px 10px;border-radius:9px;font-size:12.5px;font-weight:600;color:#d1d5db}
+.pop button:hover{background:rgba(255,255,255,.12);color:#fff}
+.pop button.on{color:#60a5fa}
+.pop .tick{font-weight:800}
+
+/* ---------- overlays ---------- */
+.spin{position:fixed;inset:0;display:none;align-items:center;justify-content:center;
+  pointer-events:none;z-index:15}
+.spin.on{display:flex}
+.spin i{width:46px;height:46px;border-radius:50%;border:3px solid rgba(255,255,255,.18);
+  border-top-color:#60a5fa;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.bigplay{position:fixed;inset:0;display:none;align-items:center;justify-content:center;
+  z-index:14;background:rgba(0,0,0,.28);cursor:pointer}
+.bigplay.on{display:flex}
+.bigplay span{width:88px;height:88px;border-radius:50%;background:rgba(59,130,246,.94);
+  display:flex;align-items:center;justify-content:center;
+  box-shadow:0 12px 46px rgba(0,0,0,.6);transition:transform .18s ease}
+.bigplay:hover span{transform:scale(1.07)}
+.bigplay svg{width:38px;height:38px;fill:#fff;margin-inline-start:5px}
+.err{position:fixed;inset:0;display:none;flex-direction:column;align-items:center;
+  justify-content:center;gap:16px;background:#000;z-index:40;text-align:center;padding:24px;
+  font-size:14.5px;line-height:1.7}
+.err.on{display:flex}
+.err .ico{font-size:46px}
+@media (max-width:700px){
+  .tsize{display:none}
+  .ib{width:36px;height:36px}
+  .ib.big{width:42px;height:42px}
+  .row{gap:2px}
+  #vol{width:60px}
+  .vol:hover .vslider,.vslider.open{width:68px}
+}
+</style>
+</head>
+<body>
+
+<div class="glow"></div>
+<div class="stage" id="stage">
+  <video id="vv" src="__SRC__" preload="metadata" playsinline webkit-playsinline></video>
+</div>
+
+<div class="chrome top" id="top">
+  <a class="back" href="#" onclick="closeViewerTab(event)">
+    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+      stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M15 18l-6-6 6-6"/></svg> بازگشت</a>
+  <div class="ttitle" title="__NAME__">__NAME__</div>
+  <div class="tsize">__SIZE__</div>
+  <a class="dl" id="dlBtn" download>&#8681; دانلود</a>
+</div>
+
+<div class="chrome bar" id="bar">
+  <div class="seek" id="seek">
+    <div class="track" id="track">
+      <div class="buf" id="buf"></div>
+      <div class="played" id="played"></div>
+      <div class="knob" id="knob"></div>
+    </div>
+    <div class="tip" id="tip">0:00</div>
+  </div>
+  <div class="row">
+    <button class="ib big" id="playBtn" title="پخش / مکث (Space)" aria-label="Play"></button>
+    <button class="ib" id="back10" title="۱۰ ثانیه عقب (J)" aria-label="Back 10 seconds">
+      <svg viewBox="0 0 24 24"><path d="M12 5V1L7 6l5 5V7a6 6 0 1 1-6 6H4a8 8 0 1 0 8-8z"/></svg>
+    </button>
+    <button class="ib" id="fwd10" title="۱۰ ثانیه جلو (L)" aria-label="Forward 10 seconds">
+      <svg viewBox="0 0 24 24"><path d="M12 5V1l5 5-5 5V7a6 6 0 1 0 6 6h2a8 8 0 1 1-8-8z"/></svg>
+    </button>
+    <div class="vol">
+      <button class="ib" id="muteBtn" title="بی‌صدا (M)" aria-label="Mute"></button>
+      <div class="vslider" id="vslider">
+        <input type="range" id="vol" min="0" max="100" value="100" aria-label="Volume">
+      </div>
+    </div>
+    <div class="spacer"></div>
+    <div class="time"><b id="cur">0:00</b> / <span id="dur">0:00</span></div>
+    <div class="menu">
+      <button class="ib" id="rateBtn" title="سرعت پخش" aria-label="Playback speed">
+        <svg viewBox="0 0 24 24"><path d="M12 4a8 8 0 1 0 8 8h-2a6 6 0 1 1-6-6V4z"/><path d="M12 2l4 3-4 3V2z"/></svg>
+      </button>
+      <div class="pop" id="ratePop">
+        <button data-r="0.25">0.25&times;</button>
+        <button data-r="0.5">0.5&times;</button>
+        <button data-r="0.75">0.75&times;</button>
+        <button data-r="1" class="on">1&times;<span class="tick">&#10003;</span></button>
+        <button data-r="1.25">1.25&times;</button>
+        <button data-r="1.5">1.5&times;</button>
+        <button data-r="1.75">1.75&times;</button>
+        <button data-r="2">2&times;</button>
+      </div>
+    </div>
+    <button class="ib" id="pipBtn" title="تصویر در تصویر (P)" aria-label="Picture in picture">
+      <svg viewBox="0 0 24 24"><path d="M21 3H3a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h18a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1zm0 15H3V6h18v12z"/><path d="M11 14h7v5h-7z"/></svg>
+    </button>
+    <button class="ib" id="fsBtn" title="تمام‌صفحه (F)" aria-label="Fullscreen">
+      <svg viewBox="0 0 24 24" id="fsIcon"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
+    </button>
+  </div>
+</div>
+
+<div class="spin" id="spin"><i></i></div>
+<div class="bigplay" id="bigplay"><span><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></span></div>
+<div class="err" id="err">
+  <div class="ico">&#9888;</div>
+  <div>این فرمت ویدیو در مرورگر پشتیبانی نمی&#39;شود.<br>می&#39;توانید فایل را دانلود کنید.</div>
+  <a class="dl" id="errDl" download>&#8681; دانلود فایل</a>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var NAME = __JSON_NAME__;
+  var v = document.getElementById("vv");
+  var $ = function(id){ return document.getElementById(id); };
+  var stage = $("stage"), seek = $("seek"), track = $("track");
+  var played = $("played"), buf = $("buf"), knob = $("knob"), tip = $("tip");
+  var topbar = $("top"), bar = $("bar"), spin = $("spin"), bigplay = $("bigplay");
+  var errBox = $("err"), pop = $("ratePop"), volIn = $("vol");
+
+  var ICON_PLAY = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>';
+  var ICON_PAUSE = '<svg viewBox="0 0 24 24"><path d="M6 4h4v16H6zm8 0h4v16h-4z"/></svg>';
+  var ICON_VOL = '<svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3z"/>'
+    + '<path d="M16.5 12a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4z" opacity=".9"/>'
+    + '<path d="M14 3.2v2.1a6.8 6.8 0 0 1 0 13.4v2.1a8.9 8.9 0 0 0 0-17.6z" opacity=".55"/></svg>';
+  var ICON_MUTE = '<svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3z"/>'
+    + '<path d="M16.5 9.1l1.4 1.4 1.4-1.4 1.1 1.1-1.4 1.4 1.4 1.4-1.1 1.1-1.4-1.4'
+    + '1.4 1.4-1.1 1.1-1.4-1.4-1.4 1.4-1.1-1.1 1.4-1.4-1.4-1.4z"/></svg>';
+
+  var hideTimer = null;
+
+  /* ---------- helpers ---------- */
+  function fmt(t){
+    if(!isFinite(t) || t < 0) t = 0;
+    var s = Math.floor(t % 60), m = Math.floor(t / 60) % 60, h = Math.floor(t / 3600);
+    var mm = (h ? String(m).padStart(2,"0") : String(m));
+    return (h ? h + ":" : "") + mm + ":" + String(s).padStart(2,"0");
+  }
+  function store(k, val){
+    try { if(val === undefined) return localStorage.getItem(k);
+         localStorage.setItem(k, val); } catch(e){ return null; }
+  }
+  function clamp(v2, a, b){ return v2 < a ? a : (v2 > b ? b : v2); }
+
+  /* ---------- chrome auto-hide ---------- */
+  function wake(){
+    topbar.classList.remove("hide");
+    bar.classList.remove("hide");
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(function(){
+      if(!v.paused && !pop.classList.contains("open") && !document.fullscreenElement){
+        topbar.classList.add("hide");
+        bar.classList.add("hide");
+      }
+    }, 2600);
+  }
+
+  /* ---------- play / pause ---------- */
+  function setIcon(){
+    $("playBtn").innerHTML = v.paused ? ICON_PLAY : ICON_PAUSE;
+    bigplay.classList.toggle("on", v.paused && !errBox.classList.contains("on"));
+  }
+  function play(){
+    var p = v.play();
+    if(p && p.catch) p.catch(function(){});
+  }
+  function toggle(){
+    if(v.paused) play(); else v.pause();
+  }
+  function seekBy(d){ v.currentTime = clamp(v.currentTime + d, 0, v.duration || 0); }
+  function seekTo(r){ if(isFinite(v.duration)) v.currentTime = clamp(r, 0, 1) * v.duration; }
+
+  /* ---------- progress ---------- */
+  function paint(){
+    var d = v.duration || 0, c = v.currentTime || 0;
+    var p = d > 0 ? clamp(c / d, 0, 1) : 0;
+    played.style.width = (p * 100) + "%";
+    knob.style.left = (p * 100) + "%";
+    $("cur").textContent = fmt(c);
+    if(isFinite(d)) $("dur").textContent = fmt(d);
+    var b = v.buffered, end = 0;
+    for(var i = 0; i < b.length; i++){ if(b.start(i) <= c + 0.1) end = b.end(i); }
+    buf.style.width = (d > 0 ? clamp(end / d, 0, 1) * 100 : 0) + "%";
+  }
+
+  /* ---------- seek bar interaction ---------- */
+  function ratioAt(clientX){
+    var r = track.getBoundingClientRect();
+    return clamp((clientX - r.left) / Math.max(1, r.width), 0, 1);
+  }
+  function hover(clientX){
+    var r = ratioAt(clientX), d = v.duration || 0;
+    tip.style.left = (r * 100) + "%";
+    tip.textContent = d > 0 ? fmt(r * d) : "0:00";
+  }
+  var dragging = false;
+  function down(ev){
+    if(errBox.classList.contains("on")) return;
+    dragging = true;
+    seek.classList.add("drag");
+    if(ev.target.setPointerCapture) { try { ev.target.setPointerCapture(ev.pointerId); } catch(e){} }
+    hover(ev.clientX);
+    ev.preventDefault();
+    wake();
+  }
+  function move(ev){
+    if(!dragging) return;
+    hover(ev.clientX);
+    seekTo(ratioAt(ev.clientX));
+    ev.preventDefault();
+  }
+  function up(ev){
+    if(!dragging) return;
+    dragging = false;
+    seek.classList.remove("drag");
+    if(ev) { try { seekTo(ratioAt(ev.clientX)); } catch(e){} }
+    wake();
+  }
+  seek.addEventListener("pointerdown", down);
+  seek.addEventListener("pointermove", function(ev){
+    if(dragging) move(ev); else { hover(ev.clientX); wake(); }
+  });
+  window.addEventListener("pointermove", function(ev){
+    if(dragging) move(ev);
+    wake();
+  });
+  window.addEventListener("pointerup", up);
+  window.addEventListener("pointercancel", up);
+
+  /* ---------- volume ---------- */
+  function paintVol(){
+    var m = v.muted || v.volume === 0;
+    $("muteBtn").innerHTML = m ? ICON_MUTE : ICON_VOL;
+    if(!m) volIn.value = Math.round(v.volume * 100);
+    volIn.style.background = "linear-gradient(90deg,#60a5fa " +
+      (m ? 0 : Math.round(v.volume * 100)) + "%,rgba(255,255,255,.28) " +
+      (m ? 0 : Math.round(v.volume * 100)) + "%)";
+  }
+  function setVol(x){
+    x = clamp(x, 0, 1);
+    v.volume = x;
+    v.muted = (x === 0);
+    paintVol();
+    store("bs-vol", String(x));
+  }
+  volIn.addEventListener("input", function(){ setVol(volIn.value / 100); });
+  $("muteBtn").addEventListener("click", function(){
+    if(v.muted || v.volume === 0){ var s = store("bs-vol"); setVol(s ? parseFloat(s) : 1); }
+    else { store("bs-vol", String(v.volume)); v.muted = true; paintVol(); }
+    wake();
+  });
+
+  /* ---------- speed ---------- */
+  $("rateBtn").addEventListener("click", function(ev){
+    ev.stopPropagation();
+    pop.classList.toggle("open");
+    wake();
+  });
+  pop.addEventListener("click", function(ev){
+    var b = ev.target.closest("button[data-r]");
+    if(!b) return;
+    setRate(parseFloat(b.getAttribute("data-r")));
+  });
+  function setRate(r){
+    v.playbackRate = r;
+    store("bs-rate", String(r));
+    [].forEach.call(pop.querySelectorAll("button"), function(b){
+      b.classList.toggle("on", parseFloat(b.getAttribute("data-r")) === r);
+    });
+    pop.classList.remove("open");
+  }
+
+  /* ---------- fullscreen / pip ---------- */
+  function fsIcon(){
+    $("fsIcon").innerHTML = document.fullscreenElement || document.webkitFullscreenElement
+      ? '<path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"/>'
+      : '<path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/>';
+  }
+  function toggleFs(){
+    var el = document.fullscreenElement || document.webkitFullscreenElement;
+    if(el){ (document.exitFullscreen || document.webkitExitFullscreen).call(document); }
+    else {
+      var t = document.documentElement;
+      var rq = t.requestFullscreen || t.webkitRequestFullscreen;
+      if(rq) { var p = rq.call(t); if(p && p.catch) p.catch(function(){}); }
+    }
+  }
+  $("fsBtn").addEventListener("click", function(){ toggleFs(); wake(); });
+  document.addEventListener("fullscreenchange", function(){ fsIcon(); wake(); });
+  document.addEventListener("webkitfullscreenchange", function(){ fsIcon(); wake(); });
+
+  function togglePip(){
+    if(document.pictureInPictureElement){ document.exitPictureInPicture(); return; }
+    if(!document.pictureInPictureEnabled || !v.requestPictureInPicture){
+      toast("تصویر در تصویر پشتیبانی نمی&#39;شود");
+      return;
+    }
+    var p = v.requestPictureInPicture();
+    if(p && p.catch) p.catch(function(){});
+  }
+  $("pipBtn").addEventListener("click", function(){ togglePip(); wake(); });
+  if(!document.pictureInPictureEnabled) $("pipBtn").style.display = "none";
+
+  function toast(msg){
+    var d = document.createElement("div");
+    d.textContent = msg;
+    d.style.cssText = "position:fixed;bottom:120px;left:50%;transform:translateX(-50%);"
+      + "padding:10px 18px;border-radius:12px;background:rgba(14,18,28,.95);"
+      + "border:1px solid rgba(255,255,255,.14);font-size:13px;z-index:50;"
+      + "box-shadow:0 14px 40px rgba(0,0,0,.5)";
+    document.body.appendChild(d);
+    setTimeout(function(){ d.remove(); }, 2200);
+  }
+
+  /* ---------- buttons ---------- */
+  $("playBtn").addEventListener("click", function(){ toggle(); wake(); });
+  $("back10").addEventListener("click", function(){ seekBy(-10); wake(); });
+  $("fwd10").addEventListener("click", function(){ seekBy(10); wake(); });
+  bigplay.addEventListener("click", function(){ toggle(); wake(); });
+  stage.addEventListener("click", function(ev){
+    if(ev.target === v) { toggle(); }
+    wake();
+  });
+  v.addEventListener("dblclick", function(ev){
+    if(ev.target === v) toggleFs();
+  });
+
+  document.addEventListener("click", function(ev){
+    if(!ev.target.closest(".menu")) pop.classList.remove("open");
+  });
+
+  /* ---------- keyboard ---------- */
+  document.addEventListener("keydown", function(ev){
+    var tag = (ev.target.tagName || "").toLowerCase();
+    if(tag === "input" || tag === "textarea") return;
+    var k = ev.key;
+    if(k === " " || k === "k" || k === "K"){ toggle(); }
+    else if(k === "ArrowRight"){ seekBy(ev.shiftKey ? 5 : 10); }
+    else if(k === "ArrowLeft"){ seekBy(ev.shiftKey ? -5 : -10); }
+    else if(k === "j" || k === "J"){ seekBy(-10); }
+    else if(k === "l" || k === "L"){ seekBy(10); }
+    else if(k === "ArrowUp"){ setVol(v.volume + 0.05); }
+    else if(k === "ArrowDown"){ setVol(v.volume - 0.05); }
+    else if(k === "m" || k === "M"){ $("muteBtn").click(); }
+    else if(k === "f" || k === "F"){ toggleFs(); }
+    else if(k === "p" || k === "P"){ togglePip(); }
+    else if(k === "Home"){ seekTo(0); }
+    else if(k === "End"){ seekTo(0.999); }
+    else if(k === ">"){ setRate(clamp(+(v.playbackRate + 0.25).toFixed(2), 0.25, 4)); }
+    else if(k === "<"){ setRate(clamp(+(v.playbackRate - 0.25).toFixed(2), 0.25, 4)); }
+    else if(k >= "0" && k <= "9"){ seekBy((+k / 10 - v.currentTime / (v.duration || 1)) * (v.duration || 0)); }
+    else return;
+    ev.preventDefault();
+    wake();
+  });
+
+  /* ---------- media events ---------- */
+  v.addEventListener("play", function(){ setIcon(); wake(); });
+  v.addEventListener("pause", function(){ setIcon(); wake(); });
+  v.addEventListener("ended", function(){ setIcon(); topbar.classList.remove("hide"); bar.classList.remove("hide"); });
+  v.addEventListener("timeupdate", paint);
+  v.addEventListener("durationchange", paint);
+  v.addEventListener("progress", paint);
+  v.addEventListener("waiting", function(){ spin.classList.add("on"); });
+  v.addEventListener("stalled", function(){ spin.classList.add("on"); });
+  v.addEventListener("seeking", function(){ spin.classList.add("on"); });
+  v.addEventListener("canplay", function(){ spin.classList.remove("on"); paint(); });
+  v.addEventListener("playing", function(){ spin.classList.remove("on"); });
+  v.addEventListener("volumechange", paintVol);
+  v.addEventListener("ratechange", function(){
+    [].forEach.call(pop.querySelectorAll("button"), function(b){
+      b.classList.toggle("on", parseFloat(b.getAttribute("data-r")) === v.playbackRate);
+    });
+  });
+  v.addEventListener("error", function(){
+    spin.classList.remove("on");
+    errBox.classList.add("on");
+    topbar.classList.remove("hide");
+    bar.classList.add("hide");
+  });
+
+  /* ---------- close / download ---------- */
+  var dl = $("dlBtn"), er = $("errDl");
+  dl.href = location.pathname;
+  dl.setAttribute("download", NAME);
+  er.href = location.pathname;
+  er.setAttribute("download", NAME);
+  window.closeViewerTab = function(ev){
+    if(ev) ev.preventDefault();
+    try { window.close(); } catch(e){}
+    setTimeout(function(){
+      try { if(!window.closed) history.back(); }
+      catch(e2){ location.href = location.pathname.replace(/[^/]*$/,"") || "/"; }
+    }, 80);
+  };
+
+  /* ---------- boot ---------- */
+  var sv = parseFloat(store("bs-vol"));
+  v.volume = isFinite(sv) ? clamp(sv, 0, 1) : 1;
+  var sr = parseFloat(store("bs-rate"));
+  if(isFinite(sr) && sr >= 0.25 && sr <= 4) v.playbackRate = sr;
+  v.muted = false;
+  paintVol();
+  [].forEach.call(pop.querySelectorAll("button"), function(b){
+    b.classList.toggle("on", parseFloat(b.getAttribute("data-r")) === v.playbackRate);
+  });
+  fsIcon();
+  setIcon();
+  paint();
+  wake();
+  play();
+})();
+</script>
+</body>
+</html>
+"""
 # ---------------------------------------------------------------------------
 # File server
 # ---------------------------------------------------------------------------
@@ -1250,6 +1855,14 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
         api = (query.get("__api") or [""])[0]
         if api == "upload":
             return self._handle_upload()
+        if api == "upstart":
+            return self._handle_upstart()
+        if api == "uppart":
+            return self._handle_uppart()
+        if api == "upfinish":
+            return self._handle_upfinish()
+        if api == "updrop":
+            return self._handle_updrop()
         if api == "mkdir":
             return self._handle_mkdir()
         if api == "create":
@@ -1524,6 +2137,181 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
             return
         logger.info("Uploaded %s -> %s", ", ".join(saved), target)
         self._json_response(HTTPStatus.OK, {"ok": True, "files": saved})
+
+    # -- resumable uploads -------------------------------------------------
+    # The browser splits every file into UPLOAD_PART-sized chunks and posts them
+    # one at a time. Nothing is written to the real destination until the last
+    # chunk arrives, so a paused upload never leaves a half-written file behind
+    # and "resume" only re-sends what never made it.
+
+    def _handle_upstart(self):
+        """Open a session: returns the session id and the negotiated part size."""
+        target = self._target_dir()
+        if target is None:
+            self._json_response(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad directory"})
+            return
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        raw = (query.get("name") or [""])[0]
+        name = self._safe_name(raw, allow_basename=True)
+        if not name:
+            self._json_response(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid file name"})
+            return
+        try:
+            size = int((query.get("size") or ["0"])[0])
+        except ValueError:
+            size = 0
+        if size < 0:
+            size = 0
+        store = storage()
+        rel = self._rel_of(target) if store is not None else ""
+        user = self._current_user()
+        sid = uuid.uuid4().hex
+        sess = UploadSession(sid, store, target, name, rel, user, size,
+                             neon.guess_content_type(name) if (store and neon) else "")
+        try:
+            if store is not None:
+                sess.upload_id = store.create_multipart(sess.key, content_type=sess.ctype)
+            else:
+                sess.scratch = target / f".bsup-{sid}.part"
+                with open(sess.scratch, "wb"):
+                    pass
+        except OSError as exc:
+            self._json_response(HTTPStatus.BAD_GATEWAY,
+                                {"ok": False, "error": f"storage error: {exc}"})
+            return
+        except Exception as exc:  # noqa: BLE001 - object storage failure
+            self._json_response(HTTPStatus.BAD_GATEWAY,
+                                {"ok": False, "error": f"storage error: {exc}"})
+            return
+        with _UPLOADS_LOCK:
+            _UPLOADS[sid] = sess
+        self._json_response(HTTPStatus.OK, {
+            "ok": True, "sid": sid, "name": name,
+            "part": UPLOAD_PART, "parts": sess.part_count(),
+        })
+
+    def _handle_uppart(self):
+        """Store one chunk. Re-sending the same index simply replaces it."""
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        sess = _upload_session((query.get("sid") or [""])[0])
+        if sess is None:
+            self._json_response(HTTPStatus.NOT_FOUND, {"ok": False, "error": "unknown upload"})
+            return
+        try:
+            index = int((query.get("part") or ["-1"])[0])
+        except ValueError:
+            index = -1
+        total = sess.part_count()
+        if index < 0 or index >= total:
+            self._json_response(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad part index"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        expect = sess.size - index * UPLOAD_PART
+        if expect > UPLOAD_PART:
+            expect = UPLOAD_PART
+        if length != expect:
+            self._json_response(HTTPStatus.BAD_REQUEST,
+                                {"ok": False, "error": "part length mismatch"})
+            return
+
+        # Buffer the chunk, then hand it over in one go: the storage SDKs want a
+        # known length, and the spool keeps RAM flat for big parts.
+        spool = tempfile.SpooledTemporaryFile(max_size=UPLOAD_PART_SPILL)
+        try:
+            received = self._read_body_stream(spool.write, chunk_size=UPLOAD_CHUNK)
+            if received != length:
+                # The connection died mid-chunk. Refuse it so the client keeps
+                # re-sending this part instead of resuming on top of a hole.
+                self._json_response(HTTPStatus.BAD_REQUEST,
+                                    {"ok": False, "error": "part truncated"})
+                return
+            spool.seek(0)
+            if sess.store is not None:
+                etag = sess.store.upload_part(sess.key, sess.upload_id,
+                                             index + 1, spool, length)
+            else:
+                with open(sess.scratch, "r+b") as fh:
+                    fh.seek(index * UPLOAD_PART)
+                    remaining = length
+                    while remaining > 0:
+                        piece = spool.read(min(UPLOAD_CHUNK, remaining))
+                        if not piece:
+                            break
+                        fh.write(piece)
+                        remaining -= len(piece)
+                    fh.truncate(index * UPLOAD_PART + (length - remaining))
+                etag = str(length)
+        except Exception as exc:  # noqa: BLE001 - storage/network failure
+            logger.exception("upload part failed")
+            self._json_response(HTTPStatus.BAD_GATEWAY,
+                                {"ok": False, "error": f"storage error: {exc}"})
+            return
+        finally:
+            try:
+                spool.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+        sess.parts[index] = etag
+        self._json_response(HTTPStatus.OK, {"ok": True, "part": index, "bytes": length})
+
+    def _handle_upfinish(self):
+        """All chunks are in: assemble them and publish the real file."""
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        sid = (query.get("sid") or [""])[0]
+        sess = _upload_session(sid)
+        if sess is None:
+            self._json_response(HTTPStatus.NOT_FOUND, {"ok": False, "error": "unknown upload"})
+            return
+        total = sess.part_count()
+        missing = [i for i in range(total) if i not in sess.parts]
+        if missing:
+            _upload_forget(sid)
+            _upload_discard(sess)
+            self._json_response(HTTPStatus.BAD_REQUEST, {
+                "ok": False, "error": f"missing {len(missing)} part(s)",
+                "missing": missing[:32],
+            })
+            return
+        name = sess.name
+        try:
+            if sess.store is not None:
+                sess.store.complete_multipart(
+                    sess.key, sess.upload_id,
+                    [(i + 1, sess.parts[i]) for i in range(total)],
+                )
+                sess.store.record_file(
+                    sess.key, name=name, size=sess.size,
+                    content_type=sess.ctype, user=sess.user,
+                )
+            else:
+                dest = sess.target / name
+                if sess.scratch is None or not sess.scratch.exists():
+                    raise OSError("scratch file missing")
+                os.replace(str(sess.scratch), str(dest))
+                sess.scratch = None
+        except Exception as exc:  # noqa: BLE001 - storage/network failure
+            logger.exception("upload finish failed")
+            _upload_forget(sid)
+            _upload_discard(sess)
+            self._json_response(HTTPStatus.BAD_GATEWAY,
+                                {"ok": False, "error": f"storage error: {exc}"})
+            return
+        _upload_forget(sid)
+        logger.info("Uploaded %s -> %s (%d part(s))", name, sess.target, total)
+        self._json_response(HTTPStatus.OK, {"ok": True, "files": [name]})
+
+    def _handle_updrop(self):
+        """The client cancelled: throw away every chunk without publishing."""
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        sid = (query.get("sid") or [""])[0]
+        sess = _upload_forget(sid)
+        if sess is not None:
+            _upload_discard(sess)
+        self._json_response(HTTPStatus.OK, {"ok": True})
 
     def _handle_mkdir(self):
         target = self._target_dir()
@@ -2228,103 +3016,29 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
         return self._send_file(path)
 
     def _render_video_viewer(self, path: Path):
-        """Serve a fullscreen video player page fitted to the screen."""
-        st = self._entry_stat(path)
-        if st is None:
-            self.send_error(HTTPStatus.NOT_FOUND, "File not found")
-            return None
-        name = html.escape(path.name)
-        size = human_size(st.st_size)
-        src = html.escape(urllib.parse.quote(path.name))
-        page = (
-            "<!DOCTYPE html>\n"
-            '<html lang="en">\n'
-            "<head>\n"
-            '<meta charset="utf-8">\n'
-            '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
-            "<title>" + name + " - Black Server</title>\n"
-            '<link rel="icon" href="/favicon.ico" sizes="any">\n'
-            "<style>\n"
-            "*{box-sizing:border-box;margin:0;padding:0;}\n"
-            "html,body{height:100%;width:100%;background:#000;overflow:hidden;}\n"
-            "body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;color:#e5e7eb;}\n"
-            ".vstage{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#000;}\n"
-            ".vstage video{max-width:100%;max-height:100%;width:auto;height:auto;"
-            "object-fit:contain;background:#000;outline:none;}\n"
-            ".vbar{position:fixed;top:14px;left:14px;right:14px;display:flex;align-items:center;gap:10px;"
-            "z-index:5;background:rgba(10,14,22,.72);border:1px solid rgba(255,255,255,.12);"
-            "border-radius:12px;padding:8px 12px;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);}\n"
-            ".vname{font-weight:700;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;"
-            "white-space:nowrap;flex:1;min-width:0;}\n"
-            ".vsize{font-size:12px;color:#9ca3af;white-space:nowrap;}\n"
-            ".vbtn{border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.08);color:#f3f4f6;"
-            "padding:7px 14px;border-radius:9px;font-size:12.5px;font-weight:600;cursor:pointer;"
-            "text-decoration:none;display:inline-flex;align-items:center;gap:7px;font-family:inherit;}\n"
-            ".vbtn.primary{background:linear-gradient(135deg,#4f8cff,#3b5bfc);border-color:transparent;color:#fff;}\n"
-            ".vbtn:hover{filter:brightness(1.15);}\n"
-            ".vplay{position:fixed;inset:0;display:none;align-items:center;justify-content:center;"
-            "z-index:4;background:rgba(0,0,0,.35);cursor:pointer;}\n"
-            ".vplay span{width:84px;height:84px;border-radius:50%;background:rgba(59,130,246,.92);color:#fff;"
-            "font-size:34px;display:flex;align-items:center;justify-content:center;"
-            "box-shadow:0 10px 40px rgba(0,0,0,.5);}\n"
-            ".verr{position:fixed;inset:0;display:none;flex-direction:column;align-items:center;"
-            "justify-content:center;gap:14px;background:#000;color:#e5e7eb;z-index:6;"
-            "text-align:center;padding:24px;font-size:14.5px;}\n"
-            "@media (max-width:600px){.vsize{display:none;}}\n"
-            "</style>\n"
-            "</head>\n"
-            "<body>\n"
-            '<div class="vbar" id="vbar">\n'
-            f'<span class="vname">{name}</span>\n'
-            f'<span class="vsize">{size}</span>\n'
-            '<button class="vbtn" type="button" onclick="closeViewerTab()">Back</button>\n'
-            '<a class="vbtn primary" id="dlBtn" download>&#8681; Download</a>\n'
-            "</div>\n"
-            '<div class="vstage">\n'
-            f'<video id="vv" src="{src}?raw=1" controls autoplay playsinline preload="metadata"></video>\n'
-            "</div>\n"
-            '<div class="vplay" id="vplay"><span>&#9654;</span></div>\n'
-            '<div class="verr" id="verr"><div>This format cannot be played in the browser.</div>\n'
-            '<a class="vbtn primary" id="errDl" download>&#8681; Download file</a></div>\n'
-            "<script>\n"
-            "function closeViewerTab(){\n"
-            "  try{window.close();}catch(e){}\n"
-            "  setTimeout(function(){\n"
-            "    try{ if(!window.closed) history.back(); }catch(e2){\n"
-            "      location.href=location.pathname.replace(/[^/]*$/,'')||'/';\n"
-            "    }\n"
-            "  },80);\n"
-            "}\n"
-            "(function(){\n"
-            "  var nm=" + json.dumps(path.name) + ";\n"
-            "  var a=document.getElementById('dlBtn');\n"
-            "  a.href=location.pathname;\n"
-            "  a.setAttribute('download',nm);\n"
-            "  var e=document.getElementById('errDl');\n"
-            "  e.href=location.pathname;\n"
-            "  e.setAttribute('download',nm);\n"
-            "  var v=document.getElementById('vv');\n"
-            "  var pl=document.getElementById('vplay');\n"
-            "  pl.addEventListener('click',function(){ pl.style.display='none'; v.muted=false; try{v.play();}catch(e3){} });\n"
-            "  v.addEventListener('error',function(){ document.getElementById('verr').style.display='flex'; });\n"
-            "  var p=null; try{ p=v.play(); }catch(e4){}\n"
-            "  if(p&&p.catch){ p.catch(function(){ pl.style.display='flex'; }); }\n"
-            "})();\n"
-            "</script>\n"
-            "</body>\n"
-            "</html>\n"
-        )
-        data = page.encode("utf-8")
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache")
-        accept_enc = (self.headers.get("Accept-Encoding") or "").lower()
-        if "gzip" in accept_enc:
-            data = gzip.compress(data, compresslevel=5)
-            self.send_header("Content-Encoding", "gzip")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        return io.BytesIO(data)
+            """Serve the dedicated fullscreen video player page."""
+            st = self._entry_stat(path)
+            if st is None:
+                self.send_error(HTTPStatus.NOT_FOUND, "File not found")
+                return None
+            page = (
+                PLAYER_HTML
+                .replace("__NAME__", html.escape(path.name))
+                .replace("__SIZE__", html.escape(human_size(st.st_size)))
+                .replace("__SRC__", html.escape(urllib.parse.quote(path.name)) + "?raw=1")
+                .replace("__JSON_NAME__", json.dumps(path.name))
+            )
+            data = page.encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            accept_enc = (self.headers.get("Accept-Encoding") or "").lower()
+            if "gzip" in accept_enc:
+                data = gzip.compress(data, compresslevel=5)
+                self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            return io.BytesIO(data)
 
     def _render_image_viewer(self, path: Path):
         """Serve an image viewer page with a top download button."""
@@ -4265,8 +4979,74 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
     font-size: 12.5px; color: var(--text2); word-break: break-all;
     min-height: 1.3em; margin-bottom: 4px;
   }}
+  .up-modal {{
+    text-align: right;
+    max-height: calc(100dvh - 32px); overflow-y: auto;
+  }}
+  .up-modal h2, .up-modal .msub {{ text-align: center; }}
+  .up-modal .up-pct {{ text-align: center; }}
   .up-done {{
     color: var(--green); font-weight: 700; font-size: 14px; margin-top: 6px;
+  }}
+  /* per-file rows inside the upload modal */
+  .up-list {{
+    display: flex; flex-direction: column; gap: 9px;
+    margin: 14px 0 4px; max-height: min(46vh, 340px); overflow-y: auto;
+    text-align: right; padding-inline-end: 2px;
+  }}
+  .up-item {{
+    background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 13px; padding: 9px 11px;
+    transition: border-color .2s, background .2s;
+  }}
+  .up-item.done {{ border-color: rgba(34,197,94,.4); }}
+  .up-item.paused {{ border-color: rgba(245,158,11,.45); }}
+  .up-item.err {{ border-color: rgba(239,68,68,.45); }}
+  .up-top {{ display: flex; align-items: center; gap: 9px; }}
+  .up-ico {{
+    width: 28px; height: 28px; border-radius: 9px; flex-shrink: 0;
+    background: var(--panel3); border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center; font-size: 13px;
+  }}
+  .up-name {{
+    flex: 1; min-width: 0; font-size: 12.5px; font-weight: 600; color: var(--text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: ltr;
+    text-align: left;
+  }}
+  .up-pcti {{
+    font-size: 11.5px; font-weight: 700; color: var(--text2);
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+  }}
+  .up-item.done .up-pcti {{ color: var(--green); }}
+  .up-item.err .up-pcti {{ color: var(--red); }}
+  .up-item.paused .up-pcti {{ color: var(--amber, #f59e0b); }}
+  .up-bottom {{ display: flex; align-items: center; gap: 8px; margin-top: 8px; }}
+  .up-track {{
+    flex: 1; height: 6px; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 999px; overflow: hidden;
+  }}
+  .up-track > i {{
+    display: block; height: 100%; width: 0%;
+    background: linear-gradient(90deg, var(--blue), var(--blue2));
+    border-radius: 999px; transition: width .15s linear;
+  }}
+  .up-item.done .up-track > i {{ background: linear-gradient(90deg, #16a34a, var(--green)); }}
+  .up-item.err .up-track > i {{ background: linear-gradient(90deg, #b91c1c, var(--red)); }}
+  .up-item.paused .up-track > i {{ background: linear-gradient(90deg, #b45309, #f59e0b); }}
+  .upb {{
+    flex-shrink: 0; padding: 5px 10px; border-radius: 8px;
+    font-size: 11.5px; font-weight: 700; font-family: inherit; cursor: pointer;
+    border: 1px solid var(--border2); background: var(--panel);
+    color: var(--text2); transition: all .15s; line-height: 1.4;
+  }}
+  .upb:hover {{ border-color: var(--blue); color: var(--text); }}
+  .upb.stop {{ color: var(--amber, #f59e0b); }}
+  .upb.go {{ color: var(--green); }}
+  .upb.del {{ color: var(--red); }}
+  .upb[disabled] {{ opacity: .4; cursor: default; }}
+  .up-size {{
+    font-size: 10.5px; color: var(--text3); white-space: nowrap;
+    font-variant-numeric: tabular-nums;
   }}
   .choice-grid {{
     display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
@@ -4703,15 +5483,16 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
 
 <!-- glass modal: upload progress -->
 <div class="modal-back" id="upModal" onclick="if(event.target===this)cancelUpload()">
-  <div class="modal" role="dialog" aria-modal="true">
+  <div class="modal up-modal" role="dialog" aria-modal="true">
     <h2 id="upTitle">آپلود فایل</h2>
     <div class="msub" id="upSub">در حال انتقال به سرور…</div>
     <div class="up-pct" id="upPct">0%</div>
     <div class="up-bar"><i id="upBar"></i></div>
     <div class="up-meta" id="upMeta"></div>
+    <div class="up-list" id="upList"></div>
     <div class="up-done" id="upDone" style="display:none">✓ آپلود شد</div>
     <div class="modal-actions" id="upActions">
-      <button class="btn ghost" id="upCancelBtn" onclick="cancelUpload()">لغو</button>
+      <button class="btn ghost" id="upCancelBtn" onclick="cancelUpload()">لغو همه</button>
       <button class="btn ok" id="upCloseBtn" onclick="closeUploadModal()" style="display:none">بستن</button>
     </div>
   </div>
@@ -5611,100 +6392,343 @@ function markThemeUI() {{
   }});
 }}
 
-/* ===== UPLOAD ===== */
-var _upXhr = null;
+/* ===== UPLOAD (resumable, one row per file) ===== */
+var UP = [];              /* every file the user picked, in order */
 var _upDoneTimer = null;
+var _upCounter = 0;
 
-function openUploadModal(count, names) {{
-  var m = document.getElementById("upModal");
+function upBytes(n) {{
+  if (!n && n !== 0) return "—";
+  var u = ["B", "KB", "MB", "GB", "TB"], i = 0, v = n;
+  while (v >= 1024 && i < u.length - 1) {{ v /= 1024; i++; }}
+  return (i ? v.toFixed(v < 10 ? 1 : 0) : v) + " " + u[i];
+}}
+function upEsc(s) {{
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}}
+function _upJson(xhr) {{
+  try {{ return JSON.parse(xhr.responseText); }} catch (e) {{ return null; }}
+}}
+
+function openUploadModal(count) {{
   document.getElementById("upTitle").textContent = "آپلود فایل";
   document.getElementById("upSub").textContent = count + " فایل — در حال انتقال به سرور…";
   document.getElementById("upPct").textContent = "0%";
   document.getElementById("upBar").style.width = "0%";
-  document.getElementById("upMeta").textContent = names.slice(0, 4).join("، ")
-    + (names.length > 4 ? " و " + (names.length - 4) + " مورد دیگر" : "");
+  document.getElementById("upMeta").textContent = "";
   document.getElementById("upDone").style.display = "none";
+  document.getElementById("upDone").style.color = "";
   document.getElementById("upCancelBtn").style.display = "";
   document.getElementById("upCloseBtn").style.display = "none";
-  m.classList.add("open");
+  document.getElementById("upModal").classList.add("open");
 }}
 function closeUploadModal() {{
   document.getElementById("upModal").classList.remove("open");
   clearTimeout(_upDoneTimer);
-  _upXhr = null;
 }}
-function cancelUpload() {{
-  if (_upXhr) {{
-    try {{ _upXhr.abort(); }} catch (e) {{}}
-    _upXhr = null;
+
+function _upAbort(it) {{
+  if (it && it.xhr) {{
+    var x = it.xhr;
+    it.xhr = null;
+    it.gen = (it.gen || 0) + 1;
+    try {{ x.abort(); }} catch (e) {{}}
   }}
-  closeUploadModal();
-  toast("Upload cancelled");
+}}
+function _upDropSession(it) {{
+  if (!it.sid) return;
+  var sid = it.sid;
+  it.sid = null;
+  try {{
+    var x = new XMLHttpRequest();
+    x.open("POST", location.pathname + "?__api=updrop&sid=" + encodeURIComponent(sid));
+    x.send();
+  }} catch (e) {{}}
+}}
+
+/* every button of one row */
+function uploadItemAction(id, what) {{
+  var it = null;
+  for (var i = 0; i < UP.length; i++) if (UP[i].id === id) it = UP[i];
+  if (!it) return;
+  if (what === "cancel") {{
+    _upAbort(it);
+    it.state = "cancelled";
+    _upDropSession(it);
+    renderUploads();
+    uploadTick();
+    return;
+  }}
+  if (what === "pause") {{
+    if (it.state !== "uploading") return;
+    _upAbort(it);
+    it.inflight = 0;
+    it.state = "paused";
+    renderUploads();
+    uploadTick();
+    return;
+  }}
+  if (what === "resume") {{
+    if (it.state !== "paused" && it.state !== "error") return;
+    it.state = "queued";
+    it.inflight = 0;
+    it.error = "";
+    renderUploads();
+    pumpUploads();
+    return;
+  }}
+}}
+
+function renderUploads() {{
+  var host = document.getElementById("upList");
+  var active = UP.filter(function(x) {{ return x.state !== "cancelled"; }});
+  var acc = 0, tot = 0, doneN = 0, pausedN = 0, errN = 0, busy = 0;
+  var html = "";
+  active.forEach(function(it) {{
+    var sent = it.acked + (it.inflight || 0);
+    var pct = it.size > 0 ? Math.min(100, Math.round((sent / it.size) * 100)) : 0;
+    if (it.state === "done") pct = 100;
+    var label = pct + "%", cap = "";
+    var buttons = "";
+    if (it.state === "done") {{
+      doneN++; label = "✓ کامل";
+    }} else if (it.state === "paused") {{
+      pausedN++; label = "توقف " + pct + "%"; cap = "paused";
+      buttons = '<button class="upb del" onclick="uploadItemAction(\\'' + it.id + '\\',\\'cancel\\')">لغو</button>'
+              + '<button class="upb go" onclick="uploadItemAction(\\'' + it.id + '\\',\\'resume\\')">ادامه</button>';
+    }} else if (it.state === "error") {{
+      errN++; cap = "err"; label = "خطا";
+      buttons = '<button class="upb del" onclick="uploadItemAction(\\'' + it.id + '\\',\\'cancel\\')">لغو</button>'
+              + '<button class="upb stop" onclick="uploadItemAction(\\'' + it.id + '\\',\\'resume\\')">تلاش دوباره</button>';
+    }} else {{
+      busy++;
+      if (it.state === "queued") {{ cap = "paused"; label = "در صف"; }}
+      else label = pct + "%";
+      buttons = '<button class="upb del" onclick="uploadItemAction(\\'' + it.id + '\\',\\'cancel\\')">لغو</button>'
+              + '<button class="upb stop" onclick="uploadItemAction(\\'' + it.id + '\\',\\'pause\\')">توقف</button>';
+    }}
+    acc += sent; tot += it.size;
+    html += '<div class="up-item ' + cap + '">'
+      + '<div class="up-top">'
+      + '<span class="up-ico">&#128196;</span>'
+      + '<span class="up-name" title="' + upEsc(it.file.name) + '">' + upEsc(it.file.name) + '</span>'
+      + '<span class="up-size">' + upBytes(it.size) + '</span>'
+      + '<span class="up-pcti">' + label + '</span>'
+      + '</div>'
+      + '<div class="up-bottom">'
+      + '<div class="up-track"><i style="width:' + pct + '%"></i></div>'
+      + buttons
+      + '</div>'
+      + (it.error ? '<div class="up-size" style="margin-top:6px;color:var(--red)">' + upEsc(it.error) + '</div>' : "")
+      + '</div>';
+  }});
+  host.innerHTML = html;
+  var p = tot > 0 ? Math.min(100, Math.round((acc / tot) * 100)) : 0;
+  document.getElementById("upPct").textContent = p + "%";
+  document.getElementById("upBar").style.width = p + "%";
+  document.getElementById("upMeta").textContent = active.length
+    ? active.length + " فایل • " + upBytes(acc) + " از " + upBytes(tot)
+    : "";
+  var sub = document.getElementById("upSub");
+  if (doneN && doneN === active.length) sub.textContent = "انتقال کامل شد";
+  else if (pausedN && !busy) sub.textContent = pausedN + " فایل متوقف است";
+  else if (errN && !busy) sub.textContent = errN + " فایل با خطا مواجه شد";
+  else sub.textContent = active.length + " فایل — در حال انتقال به سرور…";
+}}
+
+/* what the modal should do now that the queue changed */
+function uploadTick() {{
+  var active = UP.filter(function(x) {{ return x.state !== "cancelled"; }});
+  if (!active.length) {{
+    var fi0 = document.getElementById("fileInput");
+    if (fi0) fi0.value = "";
+    closeUploadModal();
+    if (location.reload) location.reload();
+    return;
+  }}
+  var busy = active.some(function(x) {{ return x.state === "queued" || x.state === "uploading"; }});
+  document.getElementById("upCancelBtn").style.display = busy ? "" : "none";
+  document.getElementById("upCloseBtn").style.display = busy ? "none" : "";
+  var done = active.every(function(x) {{ return x.state === "done"; }});
+  var d = document.getElementById("upDone");
+  if (done) {{
+    d.style.display = "";
+    d.style.color = "";
+    d.textContent = "✓ آپلود شد";
+    toast("Uploaded: " + active.map(function(x) {{ return x.file.name; }}).join(", "));
+    clearTimeout(_upDoneTimer);
+    _upDoneTimer = setTimeout(function() {{
+      closeUploadModal();
+      setTimeout(function() {{ location.reload(); }}, 350);
+    }}, 1400);
+  }} else {{
+    d.style.display = "none";
+  }}
+}}
+
+/* one request: create the server-side session */
+function upStart(it) {{
+  return new Promise(function(resolve, reject) {{
+    var x = new XMLHttpRequest();
+    it.xhr = x;
+    var gen = it.gen = (it.gen || 0) + 1;
+    var q = "?__api=upstart&name=" + encodeURIComponent(it.file.name) + "&size=" + it.size;
+    x.open("POST", location.pathname + q);
+    x.onload = function() {{
+      if (gen !== it.gen) return reject({{ cancelled: true }});
+      it.xhr = null;
+      var j = _upJson(x);
+      if (x.status >= 200 && x.status < 300 && j && j.ok) resolve(j);
+      else reject({{ message: (j && j.error) || ("HTTP " + x.status) }});
+    }};
+    x.onerror = function() {{ if (gen === it.gen) {{ it.xhr = null; reject({{ message: "خطای شبکه" }}); }} }};
+    x.onabort = function() {{ if (gen === it.gen) reject({{ cancelled: true }}); }};
+    x.send();
+  }});
+}}
+
+/* one request: ship a single chunk */
+function upPart(it, index) {{
+  return new Promise(function(resolve, reject) {{
+    var start = index * it.partSize;
+    var blob = it.file.slice(start, Math.min(start + it.partSize, it.size));
+    var x = new XMLHttpRequest();
+    it.xhr = x;
+    var gen = it.gen = (it.gen || 0) + 1;
+    x.open("POST", location.pathname + "?__api=uppart&sid=" + encodeURIComponent(it.sid)
+          + "&part=" + index);
+    x.setRequestHeader("Content-Type", "application/octet-stream");
+    x.upload.onprogress = function(ev) {{
+      if (gen !== it.gen || !ev.lengthComputable) return;
+      it.inflight = ev.loaded;
+      renderUploads();
+    }};
+    x.onload = function() {{
+      if (gen !== it.gen) return reject({{ cancelled: true }});
+      it.xhr = null;
+      it.inflight = 0;
+      var j = _upJson(x);
+      if (x.status >= 200 && x.status < 300 && j && j.ok) resolve(j);
+      else reject({{ message: (j && j.error) || ("HTTP " + x.status) }});
+    }};
+    x.onerror = function() {{ if (gen === it.gen) {{ it.xhr = null; it.inflight = 0; reject({{ message: "خطای شبکه" }}); }} }};
+    x.onabort = function() {{
+      if (gen !== it.gen) return reject({{ cancelled: true }});
+      it.inflight = 0;
+      reject({{ cancelled: true }});
+    }};
+    x.send(blob);
+  }});
+}}
+
+/* one request: publish the assembled file */
+function upFinish(it) {{
+  return new Promise(function(resolve, reject) {{
+    var x = new XMLHttpRequest();
+    it.xhr = x;
+    var gen = it.gen = (it.gen || 0) + 1;
+    x.open("POST", location.pathname + "?__api=upfinish&sid=" + encodeURIComponent(it.sid));
+    x.onload = function() {{
+      if (gen !== it.gen) return reject({{ cancelled: true }});
+      it.xhr = null;
+      var j = _upJson(x);
+      if (x.status >= 200 && x.status < 300 && j && j.ok) resolve(j);
+      else reject({{ message: (j && j.error) || ("HTTP " + x.status) }});
+    }};
+    x.onerror = function() {{ if (gen === it.gen) {{ it.xhr = null; reject({{ message: "خطای شبکه" }}); }} }};
+    x.onabort = function() {{ if (gen === it.gen) reject({{ cancelled: true }}); }};
+    x.send();
+  }});
+}}
+
+/* drive one file from its first chunk to the finish request */
+async function runUpload(it) {{
+  it.state = "uploading";
+  renderUploads();
+  try {{
+    if (!it.sid) {{
+      var info = await upStart(it);
+      if (it.state === "cancelled") return;
+      it.sid = info.sid;
+      it.partSize = info.part;
+      it.parts = info.parts;
+      it.acked = 0;
+    }}
+    for (var i = 0; i < it.parts; i++) {{
+      if (it.state !== "uploading") return;
+      await upPart(it, i);
+      it.acked = Math.min(it.size, (i + 1) * it.partSize);
+      renderUploads();
+    }}
+    await upFinish(it);
+    if (it.state === "cancelled") return;
+    it.sid = null;
+    it.acked = it.size;
+    it.inflight = 0;
+    it.state = "done";
+  }} catch (err) {{
+    it.inflight = 0;
+    if (err && err.cancelled) return;      /* paused or cancelled on purpose */
+    it.state = "error";
+    it.error = (err && err.message) || "خطای نامشخص";
+  }}
+  renderUploads();
+  uploadTick();
+}}
+
+/* everything not paused, finished or cancelled starts now */
+function pumpUploads() {{
+  var jobs = [];
+  UP.forEach(function(it) {{
+    if (it.state === "queued") jobs.push(runUpload(it));
+  }});
+  uploadTick();
+  if (jobs.length) Promise.all(jobs);
+}}
+
+function cancelUpload() {{
+  var any = false;
+  UP.forEach(function(it) {{
+    if (it.state === "queued" || it.state === "uploading") {{
+      any = true;
+      _upAbort(it);
+      _upDropSession(it);
+      it.state = "cancelled";
+    }}
+  }});
+  renderUploads();
+  uploadTick();
+  if (any) toast("آپلود لغو شد");
   var fi = document.getElementById("fileInput");
   if (fi) fi.value = "";
 }}
-function finishUpload(names) {{
-  var pct = document.getElementById("upPct");
-  var bar = document.getElementById("upBar");
-  var sub = document.getElementById("upSub");
-  var done = document.getElementById("upDone");
-  pct.textContent = "100%";
-  bar.style.width = "100%";
-  sub.textContent = "انتقال کامل شد";
-  done.style.display = "";
-  done.textContent = "✓ آپلود شد: " + names.join(", ");
-  document.getElementById("upCancelBtn").style.display = "none";
-  document.getElementById("upCloseBtn").style.display = "";
-  _upXhr = null;
-  toast("Uploaded: " + names.join(", "));
-  _upDoneTimer = setTimeout(function() {{
-    closeUploadModal();
-    setTimeout(function() {{ location.reload(); }}, 350);
-  }}, 1200);
-}}
-function failUpload(msg) {{
-  var sub = document.getElementById("upSub");
-  var done = document.getElementById("upDone");
-  sub.textContent = msg || "آپلود ناموفق بود";
-  done.style.display = "";
-  done.style.color = "var(--red)";
-  done.textContent = "✗ خطا";
-  document.getElementById("upCancelBtn").style.display = "none";
-  document.getElementById("upCloseBtn").style.display = "";
-  _upXhr = null;
-  toast(msg || "Upload failed");
-}}
-function uploadFiles(fileList) {{
-  if (!fileList || !fileList.length) return;
-  var names = [];
-  for (var i = 0; i < fileList.length; i++) names.push(fileList[i].name);
-  var fd = new FormData();
-  for (var i = 0; i < fileList.length; i++) fd.append("file", fileList[i]);
-  openUploadModal(fileList.length, names);
-  var xhr = new XMLHttpRequest();
-  _upXhr = xhr;
-  xhr.open("POST", location.pathname + "?__api=upload");
-  xhr.upload.onprogress = function(ev) {{
-    if (!ev.lengthComputable) return;
-    var p = Math.min(100, Math.round((ev.loaded / ev.total) * 100));
-    document.getElementById("upPct").textContent = p + "%";
-    document.getElementById("upBar").style.width = p + "%";
-  }};
-  xhr.onload = function() {{
-    var j = null;
-    try {{ j = JSON.parse(xhr.responseText); }} catch (e) {{}}
-    if (xhr.status >= 200 && xhr.status < 300 && j && j.ok) {{
-      finishUpload(j.files || names);
-    }} else {{
-      failUpload((j && j.error) || ("HTTP " + xhr.status));
-    }}
-    document.getElementById("fileInput").value = "";
-  }};
-  xhr.onerror = function() {{ failUpload("Network error"); document.getElementById("fileInput").value = ""; }};
-  xhr.onabort = function() {{ /* handled by cancelUpload */ }};
-  xhr.send(fd);
-}}
 
+function uploadFiles(fileList) {{
+  var files = [];
+  for (var i = 0; i < (fileList ? fileList.length : 0); i++) files.push(fileList[i]);
+  if (!files.length) return;
+  openUploadModal(files.length);
+  UP = files.map(function(f) {{
+    return {{
+      id: "u" + (++_upCounter),
+      file: f,
+      size: f.size,
+      acked: 0,
+      inflight: 0,
+      partSize: 8 * 1024 * 1024,
+      parts: 1,
+      sid: null,
+      xhr: null,
+      gen: 0,
+      state: "queued",
+      error: "",
+    }};
+  }});
+  renderUploads();
+  pumpUploads();
+}}
 /* ===== NEW MODAL (جدید -> folder | file) ===== */
 var createKind = null; /* "folder" | "file" | null */
 
@@ -5796,7 +6820,8 @@ document.addEventListener("keydown", function(e) {{
     closeDelModal(); closeRenModal(); closeDestModal(); closeSettings();
     closeRowMenu();
     closeThemeMenu();
-    if (_upXhr) cancelUpload();
+    if (document.getElementById("upModal").classList.contains("open")
+        && document.getElementById("upCancelBtn").style.display !== "none") cancelUpload();
     else if (document.getElementById("upModal").classList.contains("open")
              && document.getElementById("upCloseBtn").style.display !== "none") closeUploadModal();
     if (countChecked() > 0) unselectAll();

@@ -296,6 +296,53 @@ class NeonStore:
         except ClientError:
             return False
 
+    # -- multipart uploads (resumable client uploads) ---------------------
+    def create_multipart(self, key: str, *, content_type: str = "") -> str:
+        """Begin a multipart upload and return the provider upload id."""
+        extra = {"ContentType": content_type} if content_type else {}
+        resp = self._s3.create_multipart_upload(
+            Bucket=self.bucket, Key=key, **extra
+        )
+        return str(resp["UploadId"])
+
+    def upload_part(self, key: str, upload_id: str, part_no: int, body,
+                    content_length: int) -> str:
+        """Upload one part (1-based) and return its ETag."""
+        resp = self._s3.upload_part(
+            Bucket=self.bucket,
+            Key=key,
+            UploadId=upload_id,
+            PartNumber=int(part_no),
+            Body=body,
+            ContentLength=int(content_length),
+        )
+        return str(resp["ETag"])
+
+    def complete_multipart(self, key: str, upload_id: str,
+                           parts: list) -> None:
+        """Finish a multipart upload from ``[(part_no, etag), ...]``."""
+        self._s3.complete_multipart_upload(
+            Bucket=self.bucket,
+            Key=key,
+            UploadId=upload_id,
+            MultipartUpload={
+                "Parts": [
+                    {"PartNumber": int(no), "ETag": etag} for no, etag in parts
+                ]
+            },
+        )
+
+    def abort_multipart(self, key: str, upload_id: str) -> None:
+        """Discard a multipart upload; already-gone uploads are not an error."""
+        from botocore.exceptions import ClientError
+
+        try:
+            self._s3.abort_multipart_upload(
+                Bucket=self.bucket, Key=key, UploadId=upload_id
+            )
+        except ClientError:
+            pass
+
     # -- metadata --------------------------------------------------------
     def record_file(self, key: str, *, name: str, size: int, content_type: str,
                     user: str) -> None:
