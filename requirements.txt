@@ -7,3 +7,6 @@
 # No other cloud service and no server disk is used for storing files.
 boto3>=1.34
 psycopg[binary]>=3.1
+# Optional: lets the file list downscale images server-side instead of pulling
+# full-resolution photos into the browser. Everything works without it.
+Pillow>=10.0

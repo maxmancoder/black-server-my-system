@@ -100,7 +100,7 @@ UPLOAD_CHUNK: int = 512 * 1024   # larger reads while receiving uploads
 # request at a time, so pausing only loses the part in flight. Part size follows
 # the file size (see ``upload_part_size``) to balance request count against how
 # much progress a pause can throw away.
-UPLOAD_PART_SPILL: int = 4 * 1024 * 1024   # spool this many bytes in RAM per part
+UPLOAD_PART_SPILL: int = 32 * 1024 * 1024  # keep a whole part in RAM, spill to disk beyond
 UPLOAD_SESSION_TTL: float = 24 * 3600.0     # drop forgotten sessions after a day
 
 # S3-style object stores reject any part below 5 MiB unless it is the last one,
@@ -1038,6 +1038,44 @@ def _file_badge(ext: str) -> str:
     return f'<span class="badge {cls}">{label}</span>'
 
 
+# Extensions that get a picture instead of the flat type badge.
+IMG_EXTS: frozenset = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".bmp", ".avif",
+})
+VID_EXTS: frozenset = frozenset({
+    ".mp4", ".webm", ".ogg", ".ogv", ".mov", ".mkv", ".avi", ".m4v", ".flv", ".wmv",
+})
+# Pillow cannot read these, so they are scaled by the browser instead.
+_NO_RESIZE: frozenset = frozenset({".svg", ".gif", ".avif"})
+
+
+def _row_icon(ext: str, href: str) -> str:
+    """Icon for a file row: a picture when we can show one, else the badge.
+
+    Images are served straight from ``?raw=1&th=1`` and scaled by the browser
+    (or by Pillow when it is installed). Videos get an empty box the client
+    fills with a poster frame; the badge underneath stays as the fallback for
+    anything the browser cannot decode.
+    """
+    badge = _file_badge(ext)
+    if not href:
+        return badge
+    url = html.escape(href, quote=True)
+    if ext in IMG_EXTS:
+        return (
+            f'<span class="thumbbox">'
+            f'<img class="thumb" loading="lazy" decoding="async" alt="" '
+            f'src="{url}?raw=1&amp;th=1">'
+            f'{badge}</span>'
+        )
+    if ext in VID_EXTS:
+        return (
+            f'<span class="thumbbox thumb-vid" data-thumb="{url}?raw=1">'
+            f'{badge}</span>'
+        )
+    return badge
+
+
 def _fmt_mtime(ts: float) -> str:
     """Human-friendly modified time like ``Today, 05:30 PM`` / ``May 1, 2023``."""
     dt = time.localtime(ts)
@@ -1746,6 +1784,9 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     # Buffered writes are much faster than one syscall per header/body slice.
     wbufsize = 65536
+    # Uploads are bulk transfers: Nagle would hold small replies back waiting for
+    # more data to batch, which shows up as latency between parts.
+    disable_nagle_algorithm = True
 
     # -- logging ----------------------------------------------------------
     def _client_ip(self) -> str:
@@ -3062,7 +3103,9 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
             return self.list_directory(str(path))
 
         if query.get("raw"):
-            # raw media bytes (used by <video>/<audio> src) — inline + Range
+            # raw media bytes (used by <video>/<audio>/<img> src) — inline + Range
+            if query.get("th") and path.suffix.lower() in IMG_EXTS:
+                return self._send_thumb(path)
             return self._send_file(path, inline=True)
         if query.get("zip"):
             return self._send_zip(path)
@@ -3385,6 +3428,8 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
             "    if(res.j&&res.j.ok){\n"
             "      st.textContent='Saved — closing in 3s'; st.className='estat ok';\n"
             "      btn.classList.add('saved');\n"
+            # tell the file list tab (same origin, different tab) to reload
+            "      try{ localStorage.setItem('bs-file-saved', String(Date.now())); }catch(e){}\n"
             "      setTimeout(function(){ try{window.close();}catch(e){} },3000);\n"
             "    }else{\n"
             "      st.textContent=(res.j&&res.j.error)||'Save failed'; st.className='estat err';\n"
@@ -3500,6 +3545,40 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
             f'attachment; filename="{safe_ascii}"; '
             f"filename*=UTF-8''{urllib.parse.quote(zip_name)}",
         )
+        self.end_headers()
+        return io.BytesIO(data)
+
+    def _send_thumb(self, path: Path):
+        """Small preview of an image for the file list.
+
+        Uses Pillow when it is installed so a 12 MP photo is not pulled into
+        every listing; without it the original bytes are sent and the browser
+        scales them down, which still looks right.
+        """
+        ext = path.suffix.lower()
+        try:
+            from PIL import Image, ImageOps  # optional; absent is fine
+        except Exception:  # noqa: BLE001
+            return self._send_file(path, inline=True)
+        if ext in _NO_RESIZE:
+            return self._send_file(path, inline=True)
+        box = 256
+        buf = io.BytesIO()
+        try:
+            with Image.open(path) as im:
+                im = ImageOps.exif_transpose(im)
+                if im.mode not in ("RGB", "L"):
+                    im = im.convert("RGB")
+                im.thumbnail((box, box), Image.LANCZOS)
+                im.save(buf, format="JPEG", quality=82, optimize=True)
+        except Exception as exc:  # noqa: BLE001 - unreadable image: send the original
+            logger.debug("thumbnail failed for %s: %s", path.name, exc)
+            return self._send_file(path, inline=True)
+        data = buf.getvalue()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "private, max-age=300")
         self.end_headers()
         return io.BytesIO(data)
 
@@ -3758,7 +3837,7 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
             else:
                 file_count += 1
                 ext = full.suffix.lower()
-                badge = _file_badge(ext)
+                badge = _row_icon(ext, link)
                 size_str = human_size(size_b)
                 type_label = (ext.lstrip(".") + " file") if ext else "file"
                 perms = "rw-r--r--" if store is not None else _perm_string(full)
@@ -5025,7 +5104,27 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
   .modal .msub {{
     font-size: 12.5px; color: var(--text2); margin-bottom: 20px;
   }}
-/* ===== PENDING UPLOAD ROWS (files being uploaded, shown in the list) ===== */
+/* ---- thumbnails in place of the flat badge ---- */
+.thumbbox {{
+    position: relative; flex-shrink: 0;
+    width: calc(38px * var(--list-zoom, 1));
+    height: calc(38px * var(--list-zoom, 1));
+    border-radius: 10px; overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--panel3);
+  }}
+.thumbbox .thumb {{
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    object-fit: cover; display: block;
+  }}
+/* the badge sits underneath and is what you see until a picture arrives */
+.thumbbox .badge {{ width: 100%; height: 100%; border-radius: 0; }}
+.thumb-vid::after {{
+    content: ""; position: absolute; inset: 0;
+    background: rgba(0,0,0,.25); pointer-events: none;
+  }}
+
+  /* ===== PENDING UPLOAD ROWS (files being uploaded, shown in the list) ===== */
   /* No dialog: each in-flight file gets a faded row at the top of the list,
      with a ring on its icon that fills as the transfer advances. */
   .up-row {{
@@ -5066,6 +5165,15 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
   .up-row.err .up-ring .rfg {{ stroke: var(--red); }}
   .up-row.done .up-ring .rfg {{ stroke: var(--green); }}
   .up-ring .badge {{ pointer-events: none; }}
+  /* while the file is on its way only the ring is drawn; the real icon (or its
+     thumbnail) fades in once the upload finishes */
+  .up-ring > .thumbbox, .up-ring > .badge {{
+    opacity: 0; transform: scale(.72); transition: opacity .3s, transform .3s;
+  }}
+  .up-row.done .up-ring > .thumbbox,
+  .up-row.done .up-ring > .badge {{
+    opacity: 1; transform: scale(1);
+  }}
 
   .up-sub {{ color: var(--text2); }}
   .up-sub b {{ color: var(--blue); font-weight: 700; }}
@@ -5946,6 +6054,124 @@ var TEXT_EXT = {{txt:1,html:1,htm:1,css:1,js:1,json:1,md:1,py:1,xml:1,yml:1,yaml
   kt:1,scala:1,dart:1,lua:1,ex:1,exs:1,clj:1,hs:1,ml:1,fs:1,asm:1,s:1,mk:1,cmake:1,
   gradle:1,dockerfile:1,makefile:1,gitignore:1,npmrc:1,babelrc:1,eslintrc:1,prettierrc:1}};
 
+/* ---- row icons: real pictures for images, a poster frame for videos ---- */
+function _extOf(name) {{
+  var m = /\\.([A-Za-z0-9]+)$/.exec(String(name || ""));
+  return m ? m[1].toLowerCase() : "";
+}}
+function isImgExt(e) {{ return !!IMG_EXT[e]; }}
+function isVidExt(e) {{ return !!VID_EXT[e]; }}
+
+/* mirrors the server's _row_icon so a row looks the same however it was built */
+function fileIconHTML(ext, href) {{
+  var hit = FILE_BADGES["." + ext];
+  var badge = '<span class="badge ' + (hit ? hit[0] : "file") + '">'
+            + (hit ? hit[1] : "FILE") + '</span>';
+  if (!href) return badge;
+  if (isImgExt(ext)) {{
+    return '<span class="thumbbox"><img class="thumb" loading="lazy" decoding="async"'
+         + ' alt="" src="' + escapeHtml(href) + '?raw=1&amp;th=1">' + badge + '</span>';
+  }}
+  if (isVidExt(ext)) {{
+    return '<span class="thumbbox thumb-vid" data-thumb="' + escapeHtml(href) + '?raw=1">'
+         + badge + '</span>';
+  }}
+  return badge;
+}}
+
+/* Poster frames for videos: grab one frame in the browser and drop it in the
+   box. Only for rows actually on screen, a couple at a time, once per page. */
+var THUMB_JOBS = {{}};
+var THUMB_ACTIVE = 0;
+var THUMB_MAX = 2;
+var THUMB_DONE = {{}};
+
+function _thumbPump() {{
+  while (THUMB_ACTIVE < THUMB_MAX) {{
+    var box = null;
+    for (var k in THUMB_JOBS) {{
+      if (THUMB_JOBS[k] && !THUMB_DONE[k]) {{ box = THUMB_JOBS[k]; break; }}
+    }}
+    if (!box) return;
+    var src = box.getAttribute("data-thumb");
+    delete THUMB_JOBS[box.__tid];
+    THUMB_ACTIVE++;
+    _grabPoster(src, function(dataUrl) {{
+      THUMB_ACTIVE--;
+      if (dataUrl) {{
+        var img = document.createElement("img");
+        img.className = "thumb";
+        img.alt = "";
+        img.decoding = "async";
+        img.src = dataUrl;
+        box.insertBefore(img, box.firstChild);
+      }}
+      THUMB_DONE[src] = true;
+      _thumbPump();
+    }});
+  }}
+}}
+
+function _grabPoster(src, cb) {{
+  var done = false;
+  function finish(v) {{ if (!done) {{ done = true; cb(v); }} }}
+  function grab(v) {{
+    try {{
+      var w = v.videoWidth, h = v.videoHeight;
+      if (!w || !h) return finish(null);
+      var box = document.createElement("canvas");
+      box.width = w; box.height = h;
+      box.getContext("2d").drawImage(v, 0, 0, w, h);
+      finish(box.toDataURL("image/jpeg", 0.72));
+    }} catch (e) {{ finish(null); }}
+  }}
+  try {{
+    var v = document.createElement("video");
+    v.muted = true;
+    v.playsInline = true;
+    v.preload = "metadata";
+    v.src = src;
+    var timer = setTimeout(function() {{ finish(null); }}, 8000);
+    v.onloadeddata = function() {{
+      /* a frame a little way in reads better than the very first one, but if
+         the duration is unknown just take whatever has been decoded */
+      var at = isFinite(v.duration) ? Math.min(1, v.duration * 0.1) : 0;
+      if (at > 0) {{
+        v.onseeked = function() {{ clearTimeout(timer); grab(v); }};
+        try {{ v.currentTime = at; }} catch (e) {{ clearTimeout(timer); grab(v); }}
+      }} else {{
+        clearTimeout(timer);
+        grab(v);
+      }}
+    }};
+    v.onerror = function() {{ clearTimeout(timer); finish(null); }};
+  }} catch (e) {{ finish(null); }}
+}}
+
+function initVideoPosters(root) {{
+  var boxes = (root || document).querySelectorAll(".thumb-vid[data-thumb]");
+  if (!boxes.length || !("IntersectionObserver" in window)) return;
+  var io = new IntersectionObserver(function(entries) {{
+    entries.forEach(function(en) {{
+      if (!en.isIntersecting) return;
+      io.unobserve(en.target);
+      var src = en.target.getAttribute("data-thumb");
+      if (!src || THUMB_DONE[src]) return;
+      THUMB_JOBS[src] = en.target;
+      _thumbPump();
+    }});
+  }}, {{ rootMargin: "120px" }});
+  [].forEach.call(boxes, function(b) {{ io.observe(b); }});
+}}
+
+/* fill one video box right now (used by a finished upload) */
+function loadPosterNow(box) {{
+  var src = box && box.getAttribute("data-thumb");
+  if (!src || THUMB_DONE[src]) return;
+  THUMB_JOBS[src] = box;
+  _thumbPump();
+}}
+
 function openFileRow(row) {{
   var meta = null;
   try {{ meta = JSON.parse(row.getAttribute("data-meta")); }} catch (e) {{}}
@@ -6201,7 +6427,8 @@ function runServerSearch(q) {{
           'onmouseenter="hoverRow(this)" onmouseleave="unhoverRow(this)">' +
           '<div class="fcell fchk" onclick="event.stopPropagation()">' +
           '<input type="checkbox" class="chk" onchange="onCheckChange(this)"></div>' +
-          '<div class="fcell fname"><span class="badge file">FILE</span>' +
+          '<div class="fcell fname">'
+          + fileIconHTML(_extOf(it.name), it.href) +
           '<span class="ftext"><span class="flabel">' + escapeHtml(it.name) + '</span>' +
           '<span class="fsub">' + escapeHtml(it.path) + '</span></span></div>' +
           '<div class="fcell fsize"></div>' +
@@ -6209,6 +6436,7 @@ function runServerSearch(q) {{
           '<div class="fcell fdot"></div></div>';
       }}).join("");
       updateSelectionUI();
+      initVideoPosters(tb);
     }})
     .catch(function() {{
       tb.innerHTML = '<div class="empty-state"><div>Connection error during search</div></div>';
@@ -6410,6 +6638,25 @@ function isTheme(v) {{ return THEMES.indexOf(v) >= 0; }}
   document.documentElement.setAttribute("data-theme", t);
   markThemeUI();
 }})();
+
+/* ===== STARTUP ===== */
+/* poster frames for whatever video rows the server just rendered */
+(function initPage() {{
+  /* pass no argument: a DOMContentLoaded listener would hand us the event */
+  if (document.readyState === "loading") {{
+    document.addEventListener("DOMContentLoaded", function() {{ initVideoPosters(); }});
+  }} else {{
+    initVideoPosters();
+  }}
+  /* the editor runs in its own tab and drops this key after a successful save;
+     storage events only fire in the other tabs, which is exactly what we want */
+  window.addEventListener("storage", function(e) {{
+    if (e && e.key === "bs-file-saved" && e.newValue) {{
+      try {{ localStorage.removeItem("bs-file-saved"); }} catch (err) {{}}
+      location.reload();
+    }}
+  }});
+}})();
 function toggleTheme(e) {{
   if (e) e.stopPropagation();
   var w = document.getElementById("themeWrap");
@@ -6448,12 +6695,43 @@ function upExt(name) {{
   var m = /\\.([A-Za-z0-9]+)$/.exec(String(name || ""));
   return m ? "." + m[1].toLowerCase() : "";
 }}
-function upBadge(ext) {{
-  var hit = FILE_BADGES[ext];
+/* ---- once the file exists, put its real icon (or thumbnail) in the ring ---- */
+function _upShowIcon(it) {{
+  var row = _upRow(it.id);
+  if (!row) return;
+  var ring = row.querySelector(".up-ring");
+  if (!ring) return;
+  var ext = _extOf(it.file.name);
+  var hit = FILE_BADGES["." + ext];
   var cls = hit ? hit[0] : "file";
   var label = hit ? hit[1] : "FILE";
-  return '<span class="badge ' + cls + '">' + label + '</span>';
+  /* drop the flat placeholder that stood in while the bytes were in flight */
+  while (ring.firstChild && ring.firstChild.tagName !== "svg") {{
+    ring.removeChild(ring.firstChild);
+  }}
+  var href = encodeURIComponent(it.file.name);
+  var box = document.createElement("span");
+  box.className = "thumbbox";
+  if (isImgExt(ext)) {{
+    var img = document.createElement("img");
+    img.className = "thumb";
+    img.alt = "";
+    img.decoding = "async";
+    /* cache-bust: the name may have held different bytes a moment ago */
+    img.src = href + "?raw=1&th=1&t=" + Date.now();
+    box.appendChild(img);
+  }} else if (isVidExt(ext)) {{
+    box.className = "thumbbox thumb-vid";
+    box.setAttribute("data-thumb", href + "?raw=1");
+  }}
+  var b = document.createElement("span");
+  b.className = "badge " + cls;
+  b.textContent = label;
+  box.appendChild(b);
+  ring.appendChild(box);
+  if (isVidExt(ext)) loadPosterNow(box);
 }}
+
 function _upJson(xhr) {{
   try {{ return JSON.parse(xhr.responseText); }} catch (e) {{ return null; }}
 }}
@@ -6538,7 +6816,7 @@ function _upBuildRow(it) {{
     +       '<circle class="rbg" cx="22" cy="22" r="20"></circle>'
     +       '<circle class="rfg" cx="22" cy="22" r="20"></circle>'
     +     '</svg>'
-    +     upBadge(upExt(it.file.name))
+    +     fileIconHTML(_extOf(it.file.name), "")
     +   '</span>'
     +   '<span class="ftext">'
     +     '<span class="flabel"></span>'
@@ -6745,6 +7023,7 @@ async function runUpload(it) {{
     it.acked = it.size;
     it.inflight = 0;
     it.state = "done";
+    _upShowIcon(it);
   }} catch (err) {{
     it.inflight = 0;
     if (err && err.cancelled) return;      /* paused or cancelled on purpose */
