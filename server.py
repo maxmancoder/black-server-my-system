@@ -5025,91 +5025,69 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
   .modal .msub {{
     font-size: 12.5px; color: var(--text2); margin-bottom: 20px;
   }}
-  /* upload progress */
-  .up-pct {{
-    font-size: 34px; font-weight: 800; color: var(--blue);
-    letter-spacing: -.02em; margin: 4px 0 2px; font-variant-numeric: tabular-nums;
+/* ===== PENDING UPLOAD ROWS (files being uploaded, shown in the list) ===== */
+  /* No dialog: each in-flight file gets a faded row at the top of the list,
+     with a ring on its icon that fills as the transfer advances. */
+  .up-row {{
+    grid-template-columns: 28px 1fr 90px 150px auto;
+    cursor: default; border-style: dashed;
+    border-color: rgba(var(--accent-rgb), .35);
+    background: linear-gradient(90deg, rgba(var(--accent-rgb), .07), transparent 60%);
+    animation: none;
   }}
-  .up-bar {{
-    height: 10px; background: var(--panel2); border: 1px solid var(--border);
-    border-radius: 999px; overflow: hidden; margin: 14px 0 8px;
+  .up-row:hover {{ background: linear-gradient(90deg, rgba(var(--accent-rgb), .07), transparent 60%); }}
+  .up-row .fchk {{ visibility: hidden; }}
+  .up-row .fname {{ opacity: .55; }}
+  .up-row .fsize, .up-row .fmtime {{ opacity: .45; }}
+  .up-row.done {{ border-color: rgba(34,197,94,.5); }}
+  .up-row.paused {{ border-color: rgba(245,158,11,.55); }}
+  .up-row.err {{ border-color: rgba(239,68,68,.55); }}
+  .up-row.err .fname {{ opacity: .75; }}
+
+  /* the ring drawn around the file icon */
+  .up-ring {{
+    position: relative; flex-shrink: 0;
+    width: calc(38px * var(--list-zoom, 1));
+    height: calc(38px * var(--list-zoom, 1));
+    display: flex; align-items: center; justify-content: center;
   }}
-  .up-bar > i {{
-    display: block; height: 100%; width: 0%;
-    background: linear-gradient(90deg, var(--blue), var(--blue2));
-    border-radius: 999px; transition: width .15s linear;
+  .up-ring > svg {{
+    position: absolute; inset: -4px; width: calc(100% + 8px); height: calc(100% + 8px);
+    transform: rotate(-90deg); overflow: visible; pointer-events: none;
   }}
-  .up-meta {{
-    font-size: 12.5px; color: var(--text2); word-break: break-all;
-    min-height: 1.3em; margin-bottom: 4px;
+  .up-ring circle {{ fill: none; stroke-width: 2.5; stroke-linecap: round; }}
+  .up-ring .rbg {{ stroke: rgba(255,255,255,.14); }}
+  .up-ring .rfg {{
+    stroke: var(--blue);
+    stroke-dasharray: 125.6;
+    transition: stroke-dashoffset .25s linear, stroke .2s;
   }}
-  .up-modal {{
-    text-align: right;
-    max-height: calc(100dvh - 32px); overflow-y: auto;
-  }}
-  .up-modal h2, .up-modal .msub {{ text-align: center; }}
-  .up-modal .up-pct {{ text-align: center; }}
-  .up-done {{
-    color: var(--green); font-weight: 700; font-size: 14px; margin-top: 6px;
-  }}
-  /* per-file rows inside the upload modal */
-  .up-list {{
-    display: flex; flex-direction: column; gap: 9px;
-    margin: 14px 0 4px; max-height: min(46vh, 340px); overflow-y: auto;
-    text-align: right; padding-inline-end: 2px;
-  }}
-  .up-item {{
-    background: var(--panel2); border: 1px solid var(--border);
-    border-radius: 13px; padding: 9px 11px;
-    transition: border-color .2s, background .2s;
-  }}
-  .up-item.done {{ border-color: rgba(34,197,94,.4); }}
-  .up-item.paused {{ border-color: rgba(245,158,11,.45); }}
-  .up-item.err {{ border-color: rgba(239,68,68,.45); }}
-  .up-top {{ display: flex; align-items: center; gap: 9px; }}
-  .up-ico {{
-    width: 28px; height: 28px; border-radius: 9px; flex-shrink: 0;
-    background: var(--panel3); border: 1px solid var(--border);
-    display: flex; align-items: center; justify-content: center; font-size: 13px;
-  }}
-  .up-name {{
-    flex: 1; min-width: 0; font-size: 12.5px; font-weight: 600; color: var(--text);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: ltr;
-    text-align: left;
-  }}
-  .up-pcti {{
-    font-size: 11.5px; font-weight: 700; color: var(--text2);
-    font-variant-numeric: tabular-nums; white-space: nowrap;
-  }}
-  .up-item.done .up-pcti {{ color: var(--green); }}
-  .up-item.err .up-pcti {{ color: var(--red); }}
-  .up-item.paused .up-pcti {{ color: var(--amber, #f59e0b); }}
-  .up-bottom {{ display: flex; align-items: center; gap: 8px; margin-top: 8px; }}
-  .up-track {{
-    flex: 1; height: 6px; background: var(--panel); border: 1px solid var(--border);
-    border-radius: 999px; overflow: hidden;
-  }}
-  .up-track > i {{
-    display: block; height: 100%; width: 0%;
-    background: linear-gradient(90deg, var(--blue), var(--blue2));
-    border-radius: 999px; transition: width .15s linear;
-  }}
-  .up-item.done .up-track > i {{ background: linear-gradient(90deg, #16a34a, var(--green)); }}
-  .up-item.err .up-track > i {{ background: linear-gradient(90deg, #b91c1c, var(--red)); }}
-  .up-item.paused .up-track > i {{ background: linear-gradient(90deg, #b45309, #f59e0b); }}
+  .up-row.paused .up-ring .rfg {{ stroke: #f59e0b; }}
+  .up-row.err .up-ring .rfg {{ stroke: var(--red); }}
+  .up-row.done .up-ring .rfg {{ stroke: var(--green); }}
+  .up-ring .badge {{ pointer-events: none; }}
+
+  .up-sub {{ color: var(--text2); }}
+  .up-sub b {{ color: var(--blue); font-weight: 700; }}
+  .up-row.paused .up-sub b {{ color: #f59e0b; }}
+  .up-row.err .up-sub b {{ color: var(--red); }}
+  .up-row.done .up-sub b {{ color: var(--green); }}
+
+  /* per-row buttons */
+  .fupbtns {{ display: flex; align-items: center; gap: 6px; justify-content: flex-end; }}
   .upb {{
-    flex-shrink: 0; padding: 5px 10px; border-radius: 8px;
+    padding: 5px 11px; border-radius: 8px; white-space: nowrap;
     font-size: 11.5px; font-weight: 700; font-family: inherit; cursor: pointer;
     border: 1px solid var(--border2); background: var(--panel);
     color: var(--text2); transition: all .15s; line-height: 1.4;
   }}
   .upb:hover {{ border-color: var(--blue); color: var(--text); }}
-  .upb.stop {{ color: var(--amber, #f59e0b); }}
+  .upb.stop {{ color: #f59e0b; }}
   .upb.go {{ color: var(--green); }}
   .upb.del {{ color: var(--red); }}
   .upb[disabled] {{ opacity: .4; cursor: default; }}
-  .up-size {{
-    font-size: 10.5px; color: var(--text3); white-space: nowrap;
+  .up-state {{
+    font-size: 11.5px; color: var(--text3); white-space: nowrap;
     font-variant-numeric: tabular-nums;
   }}
   .choice-grid {{
@@ -5216,6 +5194,8 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
     .metrics {{ display: none; }}
     .thead, .frow {{ grid-template-columns: 28px 1fr 80px 40px; }}
     .thead .h-mtime, .frow .fmtime {{ display: none; }}
+    /* pending uploads keep their own track so the buttons stay reachable */
+    .up-row {{ grid-template-columns: 28px 1fr 80px auto; }}
     .dots {{ opacity: 1; }}
     .tbody.grid-view .dots {{ opacity: 1; }}
   }}
@@ -5234,6 +5214,10 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
     }}
     .thead, .frow {{ grid-template-columns: 28px 1fr 40px; }}
     .thead .h-size, .frow .fsize {{ display: none; }}
+    /* only the name and the buttons survive on a phone */
+    .up-row {{ grid-template-columns: 28px 1fr auto; }}
+    .up-row .fsub {{ font-size: 11px; }}
+    .upb {{ padding: 5px 9px; font-size: 11px; }}
   }}
 </style>
 </head>
@@ -5545,23 +5529,6 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
   </div>
 </div>
 
-<!-- glass modal: upload progress -->
-<div class="modal-back" id="upModal" onclick="if(event.target===this)cancelUpload()">
-  <div class="modal up-modal" role="dialog" aria-modal="true">
-    <h2 id="upTitle">آپلود فایل</h2>
-    <div class="msub" id="upSub">در حال انتقال به سرور…</div>
-    <div class="up-pct" id="upPct">0%</div>
-    <div class="up-bar"><i id="upBar"></i></div>
-    <div class="up-meta" id="upMeta"></div>
-    <div class="up-list" id="upList"></div>
-    <div class="up-done" id="upDone" style="display:none">✓ آپلود شد</div>
-    <div class="modal-actions" id="upActions">
-      <button class="btn ghost" id="upCancelBtn" onclick="cancelUpload()">لغو همه</button>
-      <button class="btn ok" id="upCloseBtn" onclick="closeUploadModal()" style="display:none">بستن</button>
-    </div>
-  </div>
-</div>
-
 <!-- glass modal: settings -->
 <div class="modal-back" id="setModal" onclick="if(event.target===this)closeSettings()">
   <div class="modal set-modal" role="dialog" aria-modal="true">
@@ -5798,7 +5765,9 @@ function onRowClick(e, row) {{
 
 function selectRange(fromRow, toRow) {{
   var rows = Array.prototype.slice.call(document.querySelectorAll("#tbody .frow"))
-    .filter(function(r) {{ return !r.classList.contains("parent-row"); }});
+    .filter(function(r) {{
+      return !r.classList.contains("parent-row") && !r.classList.contains("up-row");
+    }});
   var i = rows.indexOf(fromRow);
   var j = rows.indexOf(toRow);
   if (i < 0 || j < 0) {{ selectOnly(toRow); LAST_ANCHOR = toRow; return; }}
@@ -5873,6 +5842,7 @@ function onCheckChange(cb) {{
 function getCheckedRows() {{
   return Array.prototype.slice.call(document.querySelectorAll("#tbody .frow")).filter(function(r) {{
     if (r.classList.contains("parent-row")) return false;
+    if (r.classList.contains("up-row")) return false;   /* still uploading */
     var c = r.querySelector(".chk");
     return c && c.checked;
   }});
@@ -5966,6 +5936,9 @@ function updateSelectionUI() {{
 }}
 
 var IMG_EXT = {{png:1,jpg:1,jpeg:1,gif:1,webp:1,svg:1,ico:1,bmp:1,avif:1}};
+/* same ext -> badge map the server used to paint the real rows, so a pending
+   upload looks exactly like the file it will become */
+var FILE_BADGES = {json.dumps({k: list(v) for k, v in _FILE_BADGES.items()})};
 var VID_EXT = {{mp4:1,webm:1,ogg:1,ogv:1,mov:1,mkv:1,avi:1,m4v:1,flv:1,wmv:1}};
 var TEXT_EXT = {{txt:1,html:1,htm:1,css:1,js:1,json:1,md:1,py:1,xml:1,yml:1,yaml:1,
   csv:1,log:1,sh:1,bat:1,ps1:1,ts:1,jsx:1,tsx:1,vue:1,php:1,java:1,c:1,cpp:1,h:1,
@@ -6085,7 +6058,8 @@ document.addEventListener("click", function(e) {{
 
 function filterRows() {{
   var q = document.getElementById("searchInput").value.trim().toLowerCase();
-  var rows = document.querySelectorAll("#tbody .frow");
+  /* pending uploads are not part of the listing: never hide or show them here */
+  var rows = document.querySelectorAll("#tbody .frow:not(.up-row)");
   if (!q) {{
     rows.forEach(function(r) {{ r.style.display = ""; }});
     var emptyOff = document.querySelector("#tbody .empty-state[data-filtered]");
@@ -6276,7 +6250,8 @@ function sortRows(key, btn) {{
   try {{ localStorage.setItem("bs-sort", key); }} catch (e) {{}}
   var tb = document.getElementById("tbody");
   var empty = tb.querySelector(".empty-state");
-  var rows = Array.prototype.slice.call(tb.querySelectorAll(".frow"));
+  /* pending upload rows stay pinned on top and are never sorted */
+  var rows = Array.prototype.slice.call(tb.querySelectorAll(".frow:not(.up-row)"));
   rows.sort(function(a, b) {{
     var ka = +(a.getAttribute("data-kind") || 2);
     var kb = +(b.getAttribute("data-kind") || 2);
@@ -6456,10 +6431,12 @@ function markThemeUI() {{
   }});
 }}
 
-/* ===== UPLOAD (resumable, one row per file) ===== */
+/* ===== UPLOAD (resumable; one faded row per file inside the list) ===== */
 var UP = [];              /* every file the user picked, in order */
-var _upDoneTimer = null;
 var _upCounter = 0;
+var _upDoneTimer = null;
+var _upRefreshed = false;
+var RING_CIRC = 125.6;    /* 2 * pi * r for the r=20 progress ring */
 
 function upBytes(n) {{
   if (!n && n !== 0) return "—";
@@ -6467,30 +6444,25 @@ function upBytes(n) {{
   while (v >= 1024 && i < u.length - 1) {{ v /= 1024; i++; }}
   return (i ? v.toFixed(v < 10 ? 1 : 0) : v) + " " + u[i];
 }}
-function upEsc(s) {{
-  return String(s == null ? "" : s)
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+function upExt(name) {{
+  var m = /\\.([A-Za-z0-9]+)$/.exec(String(name || ""));
+  return m ? "." + m[1].toLowerCase() : "";
+}}
+function upBadge(ext) {{
+  var hit = FILE_BADGES[ext];
+  var cls = hit ? hit[0] : "file";
+  var label = hit ? hit[1] : "FILE";
+  return '<span class="badge ' + cls + '">' + label + '</span>';
 }}
 function _upJson(xhr) {{
   try {{ return JSON.parse(xhr.responseText); }} catch (e) {{ return null; }}
 }}
-
-function openUploadModal(count) {{
-  document.getElementById("upTitle").textContent = "آپلود فایل";
-  document.getElementById("upSub").textContent = count + " فایل — در حال انتقال به سرور…";
-  document.getElementById("upPct").textContent = "0%";
-  document.getElementById("upBar").style.width = "0%";
-  document.getElementById("upMeta").textContent = "";
-  document.getElementById("upDone").style.display = "none";
-  document.getElementById("upDone").style.color = "";
-  document.getElementById("upCancelBtn").style.display = "";
-  document.getElementById("upCloseBtn").style.display = "none";
-  document.getElementById("upModal").classList.add("open");
+function _upRow(id) {{
+  return document.querySelector('#tbody .up-row[data-up="' + id + '"]');
 }}
-function closeUploadModal() {{
-  document.getElementById("upModal").classList.remove("open");
-  clearTimeout(_upDoneTimer);
+function _upById(id) {{
+  for (var i = 0; i < UP.length; i++) if (UP[i].id === id) return UP[i];
+  return null;
 }}
 
 function _upAbort(it) {{
@@ -6512,15 +6484,23 @@ function _upDropSession(it) {{
   }} catch (e) {{}}
 }}
 
-/* every button of one row */
+/* ---- every button of one row ---- */
+function uploadItemToggle(id) {{
+  var it = _upById(id);
+  if (!it) return;
+  /* one button, two jobs: it reads توقف while sending and ادامه while held */
+  if (it.state === "uploading" || it.state === "queued") uploadItemAction(id, "pause");
+  else uploadItemAction(id, "resume");
+}}
+
 function uploadItemAction(id, what) {{
-  var it = null;
-  for (var i = 0; i < UP.length; i++) if (UP[i].id === id) it = UP[i];
+  var it = _upById(id);
   if (!it) return;
   if (what === "cancel") {{
     _upAbort(it);
     it.state = "cancelled";
     _upDropSession(it);
+    _upRemoveRow(it);
     renderUploads();
     uploadTick();
     return;
@@ -6531,7 +6511,6 @@ function uploadItemAction(id, what) {{
     it.inflight = 0;
     it.state = "paused";
     renderUploads();
-    uploadTick();
     return;
   }}
   if (what === "resume") {{
@@ -6541,98 +6520,121 @@ function uploadItemAction(id, what) {{
     it.error = "";
     renderUploads();
     pumpUploads();
-    return;
   }}
 }}
 
+/* ---- build / drop the row that represents one file ---- */
+function _upBuildRow(it) {{
+  var row = document.createElement("div");
+  row.className = "frow file up-row";
+  row.setAttribute("data-up", it.id);
+  row.setAttribute("data-name", it.file.name);
+  row.setAttribute("data-kind", "2");
+  row.innerHTML =
+      '<div class="fcell fchk"></div>'
+    + '<div class="fcell fname">'
+    +   '<span class="up-ring">'
+    +     '<svg viewBox="0 0 44 44" aria-hidden="true">'
+    +       '<circle class="rbg" cx="22" cy="22" r="20"></circle>'
+    +       '<circle class="rfg" cx="22" cy="22" r="20"></circle>'
+    +     '</svg>'
+    +     upBadge(upExt(it.file.name))
+    +   '</span>'
+    +   '<span class="ftext">'
+    +     '<span class="flabel"></span>'
+    +     '<span class="fsub up-sub"></span>'
+    +   '</span>'
+    + '</div>'
+    + '<div class="fcell fsize"></div>'
+    + '<div class="fcell fmtime"></div>'
+    + '<div class="fcell fupbtns">'
+    +   '<span class="up-state"></span>'
+    +   '<button class="upb upb-pause stop" type="button">توقف</button>'
+    +   '<button class="upb upb-cancel del" type="button">لغو</button>'
+    + '</div>';
+  row.querySelector(".flabel").textContent = it.file.name;
+  row.querySelector(".flabel").title = it.file.name;
+  row.querySelector(".fsize").textContent = upBytes(it.size);
+  row.querySelector(".fmtime").textContent = "—";
+  row.querySelector(".upb-pause").addEventListener("click", function(ev) {{
+    ev.stopPropagation();
+    uploadItemToggle(it.id);
+  }});
+  row.querySelector(".upb-cancel").addEventListener("click", function(ev) {{
+    ev.stopPropagation();
+    uploadItemAction(it.id, "cancel");
+  }});
+  return row;
+}}
+
+function _upInsertRow(it) {{
+  var tb = document.getElementById("tbody");
+  if (!tb) return;
+  tb.insertBefore(_upBuildRow(it), tb.firstChild);
+}}
+
+function _upRemoveRow(it) {{
+  var row = _upRow(it.id);
+  if (row && row.parentNode) row.parentNode.removeChild(row);
+}}
+
+/* ---- refresh every live row ---- */
 function renderUploads() {{
-  var host = document.getElementById("upList");
-  var active = UP.filter(function(x) {{ return x.state !== "cancelled"; }});
-  var acc = 0, tot = 0, doneN = 0, pausedN = 0, errN = 0, busy = 0;
-  var html = "";
-  active.forEach(function(it) {{
+  UP.forEach(function(it) {{
+    var row = _upRow(it.id);
+    if (!row) return;
     var sent = it.acked + (it.inflight || 0);
     var pct = it.size > 0 ? Math.min(100, Math.round((sent / it.size) * 100)) : 0;
-    if (it.state === "done") pct = 100;
-    var label = pct + "%", cap = "";
-    var buttons = "";
-    if (it.state === "done") {{
-      doneN++; label = "✓ کامل";
-    }} else if (it.state === "paused") {{
-      pausedN++; label = "توقف " + pct + "%"; cap = "paused";
-      buttons = '<button class="upb del" onclick="uploadItemAction(\\'' + it.id + '\\',\\'cancel\\')">لغو</button>'
-              + '<button class="upb go" onclick="uploadItemAction(\\'' + it.id + '\\',\\'resume\\')">ادامه</button>';
-    }} else if (it.state === "error") {{
-      errN++; cap = "err"; label = "خطا";
-      buttons = '<button class="upb del" onclick="uploadItemAction(\\'' + it.id + '\\',\\'cancel\\')">لغو</button>'
-              + '<button class="upb stop" onclick="uploadItemAction(\\'' + it.id + '\\',\\'resume\\')">تلاش دوباره</button>';
-    }} else {{
-      busy++;
-      if (it.state === "queued") {{ cap = "paused"; label = "در صف"; }}
-      else label = pct + "%";
-      buttons = '<button class="upb del" onclick="uploadItemAction(\\'' + it.id + '\\',\\'cancel\\')">لغو</button>'
-              + '<button class="upb stop" onclick="uploadItemAction(\\'' + it.id + '\\',\\'pause\\')">توقف</button>';
+    var state = it.state;
+    if (state === "done") pct = 100;
+
+    row.classList.remove("done", "paused", "err");
+    if (state === "done") row.classList.add("done");
+    else if (state === "paused") row.classList.add("paused");
+    else if (state === "error") row.classList.add("err");
+
+    var fg = row.querySelector(".rfg");
+    if (fg) fg.style.strokeDashoffset = String(RING_CIRC * (1 - pct / 100));
+
+    var sub = row.querySelector(".up-sub");
+    if (sub) {{
+      if (state === "error") sub.innerHTML = "<b>خطا</b> — " + _upEsc(it.error || "نامشخص");
+      else if (state === "done") sub.innerHTML = "<b>✓ کامل</b> — " + upBytes(it.size);
+      else if (state === "paused") sub.innerHTML = "<b>متوقف</b> — " + pct + "% — " + upBytes(sent) + " از " + upBytes(it.size);
+      else if (state === "queued") sub.innerHTML = "<b>در صف</b> — " + upBytes(it.size);
+      else sub.innerHTML = "<b>" + pct + "%</b> — " + upBytes(sent) + " از " + upBytes(it.size);
     }}
-    acc += sent; tot += it.size;
-    html += '<div class="up-item ' + cap + '">'
-      + '<div class="up-top">'
-      + '<span class="up-ico">&#128196;</span>'
-      + '<span class="up-name" title="' + upEsc(it.file.name) + '">' + upEsc(it.file.name) + '</span>'
-      + '<span class="up-size">' + upBytes(it.size) + '</span>'
-      + '<span class="up-pcti">' + label + '</span>'
-      + '</div>'
-      + '<div class="up-bottom">'
-      + '<div class="up-track"><i style="width:' + pct + '%"></i></div>'
-      + buttons
-      + '</div>'
-      + (it.error ? '<div class="up-size" style="margin-top:6px;color:var(--red)">' + upEsc(it.error) + '</div>' : "")
-      + '</div>';
+
+    var info = row.querySelector(".up-state");
+    if (info) info.textContent = pct + "%";
+
+    /* the classes double as colour, so query the stable hooks instead */
+    var pause = row.querySelector(".upb-pause");
+    var cancel = row.querySelector(".upb-cancel");
+    if (pause && cancel) {{
+      if (state === "paused") {{
+        pause.textContent = "ادامه";
+        pause.classList.remove("stop");
+        pause.classList.add("go");
+      }} else {{
+        pause.textContent = "توقف";
+        pause.classList.remove("go");
+        pause.classList.add("stop");
+      }}
+      pause.disabled = (state !== "paused" && state !== "error"
+                        && state !== "uploading" && state !== "queued");
+      cancel.disabled = (state === "done");
+    }}
   }});
-  host.innerHTML = html;
-  var p = tot > 0 ? Math.min(100, Math.round((acc / tot) * 100)) : 0;
-  document.getElementById("upPct").textContent = p + "%";
-  document.getElementById("upBar").style.width = p + "%";
-  document.getElementById("upMeta").textContent = active.length
-    ? active.length + " فایل • " + upBytes(acc) + " از " + upBytes(tot)
-    : "";
-  var sub = document.getElementById("upSub");
-  if (doneN && doneN === active.length) sub.textContent = "انتقال کامل شد";
-  else if (pausedN && !busy) sub.textContent = pausedN + " فایل متوقف است";
-  else if (errN && !busy) sub.textContent = errN + " فایل با خطا مواجه شد";
-  else sub.textContent = active.length + " فایل — در حال انتقال به سرور…";
 }}
 
-/* what the modal should do now that the queue changed */
-function uploadTick() {{
-  var active = UP.filter(function(x) {{ return x.state !== "cancelled"; }});
-  if (!active.length) {{
-    var fi0 = document.getElementById("fileInput");
-    if (fi0) fi0.value = "";
-    closeUploadModal();
-    if (location.reload) location.reload();
-    return;
-  }}
-  var busy = active.some(function(x) {{ return x.state === "queued" || x.state === "uploading"; }});
-  document.getElementById("upCancelBtn").style.display = busy ? "" : "none";
-  document.getElementById("upCloseBtn").style.display = busy ? "none" : "";
-  var done = active.every(function(x) {{ return x.state === "done"; }});
-  var d = document.getElementById("upDone");
-  if (done) {{
-    d.style.display = "";
-    d.style.color = "";
-    d.textContent = "✓ آپلود شد";
-    toast("Uploaded: " + active.map(function(x) {{ return x.file.name; }}).join(", "));
-    clearTimeout(_upDoneTimer);
-    _upDoneTimer = setTimeout(function() {{
-      closeUploadModal();
-      setTimeout(function() {{ location.reload(); }}, 350);
-    }}, 1400);
-  }} else {{
-    d.style.display = "none";
-  }}
+function _upEsc(s) {{
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }}
 
-/* one request: create the server-side session */
+/* ---- one request: create the server-side session ---- */
 function upStart(it) {{
   return new Promise(function(resolve, reject) {{
     var x = new XMLHttpRequest();
@@ -6653,7 +6655,7 @@ function upStart(it) {{
   }});
 }}
 
-/* one request: ship a single chunk */
+/* ---- one request: ship a single part ---- */
 function upPart(it, index) {{
   return new Promise(function(resolve, reject) {{
     var start = index * it.partSize;
@@ -6687,7 +6689,7 @@ function upPart(it, index) {{
   }});
 }}
 
-/* one request: publish the assembled file */
+/* ---- one request: publish the assembled file ---- */
 function upFinish(it) {{
   return new Promise(function(resolve, reject) {{
     var x = new XMLHttpRequest();
@@ -6708,7 +6710,7 @@ function upFinish(it) {{
   }});
 }}
 
-/* drive one file from its first part to the finish request */
+/* ---- drive one file from its first part to the finish request ---- */
 async function runUpload(it) {{
   it.state = "uploading";
   renderUploads();
@@ -6753,7 +6755,7 @@ async function runUpload(it) {{
   uploadTick();
 }}
 
-/* everything not paused, finished or cancelled starts now */
+/* ---- everything not paused, finished or cancelled starts now ---- */
 function pumpUploads() {{
   var jobs = [];
   UP.forEach(function(it) {{
@@ -6763,30 +6765,47 @@ function pumpUploads() {{
   if (jobs.length) Promise.all(jobs);
 }}
 
-function cancelUpload() {{
-  var any = false;
-  UP.forEach(function(it) {{
-    if (it.state === "queued" || it.state === "uploading") {{
-      any = true;
-      _upAbort(it);
-      _upDropSession(it);
-      it.state = "cancelled";
-    }}
-  }});
-  renderUploads();
-  uploadTick();
-  if (any) toast("آپلود لغو شد");
+/* ---- refresh the page once the queue has nothing left to do ---- */
+function uploadTick() {{
   var fi = document.getElementById("fileInput");
+  var pending = UP.filter(function(x) {{
+    return x.state === "queued" || x.state === "uploading";
+  }});
+  var doneCount = UP.filter(function(x) {{ return x.state === "done"; }}).length;
+  var failed = UP.filter(function(x) {{ return x.state === "error"; }}).length;
+
+  if (pending.length) {{
+    /* still working: a failed file keeps its row so it can be retried */
+    if (!_upRefreshed) clearTimeout(_upDoneTimer);
+    return;
+  }}
   if (fi) fi.value = "";
+
+  /* nothing left to send */
+  if (doneCount) {{
+    toast("آپلود شد");
+    if (!_upRefreshed) {{
+      _upRefreshed = true;
+      clearTimeout(_upDoneTimer);
+      _upDoneTimer = setTimeout(function() {{ location.reload(); }}, 700);
+    }}
+    return;
+  }}
+  if (failed) return;             /* show the error rows; do not reload */
+
+  /* everything was cancelled, so the folder is unchanged: just tidy up */
+  if (_upRefreshed) return;
+  _upRefreshed = true;
+  UP.forEach(function(it) {{ _upRemoveRow(it); }});
 }}
 
 function uploadFiles(fileList) {{
   var files = [];
   for (var i = 0; i < (fileList ? fileList.length : 0); i++) files.push(fileList[i]);
   if (!files.length) return;
-  openUploadModal(files.length);
+  _upRefreshed = false;
   UP = files.map(function(f) {{
-    return {{
+    var it = {{
       id: "u" + (++_upCounter),
       file: f,
       size: f.size,
@@ -6800,6 +6819,8 @@ function uploadFiles(fileList) {{
       state: "queued",
       error: "",
     }};
+    _upInsertRow(it);
+    return it;
   }});
   renderUploads();
   pumpUploads();
@@ -6895,10 +6916,6 @@ document.addEventListener("keydown", function(e) {{
     closeDelModal(); closeRenModal(); closeDestModal(); closeSettings();
     closeRowMenu();
     closeThemeMenu();
-    if (document.getElementById("upModal").classList.contains("open")
-        && document.getElementById("upCancelBtn").style.display !== "none") cancelUpload();
-    else if (document.getElementById("upModal").classList.contains("open")
-             && document.getElementById("upCloseBtn").style.display !== "none") closeUploadModal();
     if (countChecked() > 0) unselectAll();
     return;
   }}
