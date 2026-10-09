@@ -1043,7 +1043,14 @@ IMG_EXTS: frozenset = frozenset({
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".bmp", ".avif",
 })
 VID_EXTS: frozenset = frozenset({
-    ".mp4", ".webm", ".ogg", ".ogv", ".mov", ".mkv", ".avi", ".m4v", ".flv", ".wmv",
+    ".mp4", ".webm", ".ogv", ".mov", ".mkv", ".avi", ".m4v", ".flv", ".wmv",
+})
+# Sound files get their own player. ".ogg" lives here rather than in the video
+# set because Ogg Vorbis is what people actually mean by it; ".ogv" is the rare
+# Theora video form and stays with the videos.
+AUD_EXTS: frozenset = frozenset({
+    ".mp3", ".wav", ".ogg", ".oga", ".opus", ".m4a", ".m4b", ".aac",
+    ".flac", ".wma", ".aif", ".aiff", ".mid", ".midi",
 })
 # Pillow cannot read these, so they are scaled by the browser instead.
 _NO_RESIZE: frozenset = frozenset({".svg", ".gif", ".avif"})
@@ -1241,6 +1248,593 @@ def _sidebar_tree(current: Path) -> str:
 # Dedicated video player page. Kept as one template so the markup, the styles and
 # the script stay side by side; __NAME__/__SIZE__/__SRC__/__JSON_NAME__ are
 # filled in per request.
+# Dedicated audio player page. Same chrome as the video player plus the things
+# that matter for music (repeat, a live level meter), with a disc that
+# spins while it plays.
+AUDIO_HTML = """<!DOCTYPE html>
+<html lang="fa" dir="ltr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>__NAME__ - Black Server</title>
+<link rel="icon" href="/favicon.ico" sizes="any">
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;width:100%;background:#000;overflow:hidden}
+body{font-family:'Segoe UI',system-ui,-apple-system,'Noto Sans Arabic',sans-serif;color:#e5e7eb;
+  user-select:none;-webkit-user-select:none}
+button{font-family:inherit;color:inherit;background:none;border:none;cursor:pointer}
+
+.bg{position:fixed;inset:0;overflow:hidden;background:#07080d}
+.bg i{position:absolute;border-radius:50%;filter:blur(60px);opacity:.5}
+.bg i:nth-child(1){width:52vmin;height:52vmin;background:#3b82f6;top:-8vmin;left:-6vmin}
+.bg i:nth-child(2){width:44vmin;height:44vmin;background:#a855f7;bottom:-10vmin;right:-6vmin}
+.bg i:nth-child(3){width:36vmin;height:36vmin;background:#06b6d4;top:38%;left:52%}
+
+.stage{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:26px;padding:80px 20px 168px}
+.disc{position:relative;width:min(46vmin,340px);height:min(46vmin,340px);flex-shrink:0}
+.disc svg{width:100%;height:100%;display:block;border-radius:50%;
+  box-shadow:0 26px 70px rgba(0,0,0,.7), inset 0 0 0 1px rgba(255,255,255,.08)}
+.ring{position:absolute;inset:0;border-radius:50%;overflow:hidden}
+.ring canvas{width:100%;height:100%;display:block;opacity:.9}
+.hole{position:absolute;left:50%;top:50%;width:15%;height:15%;transform:translate(-50%,-50%);
+  border-radius:50%;background:#07080d;box-shadow:inset 0 0 0 1px rgba(255,255,255,.12)}
+
+.meta{text-align:center;max-width:min(90vw,620px)}
+.ttitle{font-size:clamp(17px,3.4vw,26px);font-weight:800;letter-spacing:-.01em;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.tsub{font-size:12.5px;color:#9ca3af;margin-top:7px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+
+.chrome{position:fixed;left:0;right:0;z-index:20;transition:opacity .28s ease,
+  transform .28s ease, visibility .28s}
+.chrome.hide{opacity:0;visibility:hidden;pointer-events:none}
+.top{top:0;display:flex;align-items:center;gap:10px;padding:12px 14px;
+  padding-top:max(12px,env(safe-area-inset-top));
+  background:linear-gradient(180deg,rgba(0,0,0,.8),rgba(0,0,0,0))}
+.top.hide{transform:translateY(-100%)}
+.back{display:inline-flex;align-items:center;gap:7px;padding:8px 13px;border-radius:10px;
+  border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.07);
+  font-size:13px;font-weight:600;text-decoration:none;color:#f3f4f6;white-space:nowrap;
+  backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
+.back:hover{background:rgba(255,255,255,.15)}
+.tsize{font-size:12px;color:#9ca3af;white-space:nowrap;font-variant-numeric:tabular-nums;
+  margin-left:auto}
+.dl{display:inline-flex;align-items:center;gap:7px;padding:8px 14px;border-radius:10px;
+  border:none;background:linear-gradient(135deg,#4f8cff,#3b5bfc);color:#fff;font-size:13px;
+  font-weight:700;text-decoration:none;white-space:nowrap;box-shadow:0 4px 18px rgba(59,91,252,.4)}
+.dl:hover{filter:brightness(1.12)}
+
+.bar{bottom:0;padding:24px 18px 16px;padding-bottom:max(16px,env(safe-area-inset-bottom));
+  background:linear-gradient(0deg,rgba(0,0,0,.9),rgba(0,0,0,.6) 55%,rgba(0,0,0,0))}
+.bar.hide{transform:translateY(100%)}
+
+.seek{position:relative;height:20px;display:flex;align-items:center;cursor:pointer;
+  touch-action:none;max-width:1100px;margin:0 auto}
+.track{position:relative;width:100%;height:5px;border-radius:999px;
+  background:rgba(255,255,255,.2);transition:height .15s ease}
+.seek:hover .track,.seek.drag .track{height:8px}
+.buf,.played{position:absolute;left:0;top:0;bottom:0;border-radius:999px;width:0}
+.buf{background:rgba(255,255,255,.32)}
+.played{background:linear-gradient(90deg,#60a5fa,#3b82f6)}
+.knob{position:absolute;top:50%;width:13px;height:13px;border-radius:50%;background:#fff;
+  transform:translate(-50%,-50%) scale(0);transition:transform .15s ease;
+  box-shadow:0 2px 8px rgba(0,0,0,.6);pointer-events:none}
+.seek:hover .knob,.seek.drag .knob{transform:translate(-50%,-50%) scale(1)}
+.tip{position:absolute;bottom:26px;transform:translateX(-50%);padding:4px 8px;border-radius:7px;
+  background:rgba(12,16,26,.94);border:1px solid rgba(255,255,255,.14);font-size:11.5px;
+  font-weight:600;white-space:nowrap;opacity:0;pointer-events:none;
+  font-variant-numeric:tabular-nums;transition:opacity .12s}
+.seek:hover .tip,.seek.drag .tip{opacity:1}
+
+.row{display:flex;align-items:center;gap:6px;margin:8px auto 0;max-width:1100px}
+.ib{display:inline-flex;align-items:center;justify-content:center;width:40px;height:40px;
+  border-radius:11px;color:#e5e7eb;flex-shrink:0;transition:background .15s,transform .12s}
+.ib:hover{background:rgba(255,255,255,.14)}
+.ib:active{transform:scale(.93)}
+.ib svg{width:21px;height:21px;fill:currentColor;pointer-events:none}
+.ib.big{width:52px;height:52px}
+.ib.big svg{width:28px;height:28px}
+.ib.on{color:#60a5fa}
+.ib.dim{color:#4b5563}
+.spacer{flex:1}
+.time{font-size:12.5px;color:#d1d5db;font-variant-numeric:tabular-nums;white-space:nowrap;
+  padding:0 4px;direction:ltr}
+.time b{color:#fff;font-weight:700}
+
+.vol{display:flex;align-items:center;gap:2px}
+.vslider{width:0;overflow:hidden;transition:width .2s ease,opacity .2s ease;opacity:0}
+.vol:hover .vslider,.vslider.open{width:88px;opacity:1}
+input[type=range]{-webkit-appearance:none;appearance:none;height:4px;border-radius:999px;
+  background:rgba(255,255,255,.28);outline:none;cursor:pointer}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:13px;height:13px;
+  border-radius:50%;background:#fff;box-shadow:0 1px 5px rgba(0,0,0,.5)}
+input[type=range]::-moz-range-thumb{width:13px;height:13px;border:none;border-radius:50%;
+  background:#fff}
+#vol{width:78px;margin:0 6px}
+
+.menu{position:relative}
+.pop{position:absolute;bottom:calc(100% + 10px);right:0;min-width:110px;padding:6px;
+  border-radius:13px;background:rgba(14,18,28,.96);border:1px solid rgba(255,255,255,.14);
+  box-shadow:0 18px 46px rgba(0,0,0,.6);backdrop-filter:blur(18px);
+  -webkit-backdrop-filter:blur(18px);display:none;z-index:30}
+.pop.open{display:block;animation:pop .14s cubic-bezier(.16,1,.3,1)}
+@keyframes pop{from{opacity:0;transform:translateY(6px) scale(.97)}to{opacity:1;transform:none}}
+.pop button{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;
+  padding:8px 10px;border-radius:9px;font-size:12.5px;font-weight:600;color:#d1d5db}
+.pop button:hover{background:rgba(255,255,255,.12);color:#fff}
+.pop button.on{color:#60a5fa}
+.pop .tick{font-weight:800}
+
+.spin{position:fixed;inset:0;display:none;align-items:center;justify-content:center;
+  pointer-events:none;z-index:15}
+.spin.on{display:flex}
+.spin i{width:46px;height:46px;border-radius:50%;border:3px solid rgba(255,255,255,.18);
+  border-top-color:#60a5fa;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.bigplay{position:fixed;inset:0;display:none;align-items:center;justify-content:center;
+  z-index:14;background:rgba(0,0,0,.3);cursor:pointer}
+.bigplay.on{display:flex}
+.bigplay span{width:88px;height:88px;border-radius:50%;background:rgba(59,130,246,.94);
+  display:flex;align-items:center;justify-content:center;
+  box-shadow:0 12px 46px rgba(0,0,0,.6);transition:transform .18s ease}
+.bigplay:hover span{transform:scale(1.07)}
+.bigplay svg{width:38px;height:38px;fill:#fff;margin-inline-start:5px}
+.err{position:fixed;inset:0;display:none;flex-direction:column;align-items:center;
+  justify-content:center;gap:16px;background:#000;z-index:40;text-align:center;padding:24px;
+  font-size:14.5px;line-height:1.7}
+.err.on{display:flex}
+.err .ico{font-size:46px}
+@media (max-width:700px){
+  .tsize{display:none}
+  .stage{padding:70px 14px 176px;gap:18px}
+  .row{gap:2px}
+  .ib{width:36px;height:36px}
+  .ib.big{width:46px;height:46px}
+  #vol{width:60px}
+  .vol:hover .vslider,.vslider.open{width:68px}
+}
+</style>
+</head>
+<body>
+
+<div class="bg"><i></i><i></i><i></i></div>
+<audio id="aa" src="__SRC__" preload="metadata"></audio>
+
+<div class="stage" id="stage">
+  <div class="disc" id="disc">
+    <svg viewBox="0 0 200 200" aria-hidden="true">
+      <defs>
+        <linearGradient id="dg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#1f2937"/>
+          <stop offset="55%" stop-color="#0b1220"/>
+          <stop offset="100%" stop-color="#1a1f2e"/>
+        </linearGradient>
+      </defs>
+      <circle cx="100" cy="100" r="99" fill="url(#dg)"/>
+      <circle cx="100" cy="100" r="88" fill="none" stroke="rgba(255,255,255,.07)" stroke-width="1"/>
+      <circle cx="100" cy="100" r="66" fill="none" stroke="rgba(255,255,255,.05)" stroke-width="1"/>
+    </svg>
+    <span class="ring"><canvas id="meter" width="440" height="440"></canvas></span>
+    <span class="hole"></span>
+  </div>
+  <div class="meta">
+    <div class="ttitle" title="__NAME__">__NAME__</div>
+    <div class="tsub">__SIZE__</div>
+  </div>
+</div>
+
+<div class="chrome top" id="top">
+  <a class="back" href="#" onclick="closeViewerTab(event)">
+    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+      stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M15 18l-6-6 6-6"/></svg> بازگشت</a>
+  <div class="tsize">__SIZE__</div>
+  <a class="dl" id="dlBtn" download>&#8681; دانلود</a>
+</div>
+
+<div class="chrome bar" id="bar">
+  <div class="seek" id="seek">
+    <div class="track" id="track">
+      <div class="buf" id="buf"></div>
+      <div class="played" id="played"></div>
+      <div class="knob" id="knob"></div>
+    </div>
+    <div class="tip" id="tip">0:00</div>
+  </div>
+  <div class="row">
+
+    <button class="ib" id="back10" title="۱۰ ثانیه عقب (J)" aria-label="Back 10 seconds">
+      <svg viewBox="0 0 24 24"><path d="M12 5V1L7 6l5 5V7a6 6 0 1 1-6 6H4a8 8 0 1 0 8-8z"/></svg>
+    </button>
+    <button class="ib big" id="playBtn" title="پخش / مکث (Space)" aria-label="Play"></button>
+    <button class="ib" id="fwd10" title="۱۰ ثانیه جلو (L)" aria-label="Forward 10 seconds">
+      <svg viewBox="0 0 24 24"><path d="M12 5V1l5 5-5 5V7a6 6 0 1 0 6 6h2a8 8 0 1 1-8-8z"/></svg>
+    </button>
+    <button class="ib" id="repeatBtn" title="تکرار (R)" aria-label="Repeat">
+      <svg viewBox="0 0 24 24" id="repIcon"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>
+    </button>
+    <div class="vol">
+      <button class="ib" id="muteBtn" title="بی‌صدا (M)" aria-label="Mute"></button>
+      <div class="vslider" id="vslider">
+        <input type="range" id="vol" min="0" max="100" value="100" aria-label="Volume">
+      </div>
+    </div>
+    <div class="spacer"></div>
+    <div class="time"><b id="cur">0:00</b> / <span id="dur">0:00</span></div>
+    <div class="menu">
+      <button class="ib" id="rateBtn" title="سرعت پخش" aria-label="Playback speed">
+        <svg viewBox="0 0 24 24"><path d="M12 4a8 8 0 1 0 8 8h-2a6 6 0 1 1-6-6V4z"/><path d="M12 2l4 3-4 3V2z"/></svg>
+      </button>
+      <div class="pop" id="ratePop">
+        <button data-r="0.5">0.5&times;</button>
+        <button data-r="0.75">0.75&times;</button>
+        <button data-r="1" class="on">1&times;<span class="tick">&#10003;</span></button>
+        <button data-r="1.25">1.25&times;</button>
+        <button data-r="1.5">1.5&times;</button>
+        <button data-r="1.75">1.75&times;</button>
+        <button data-r="2">2&times;</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="spin" id="spin"><i></i></div>
+<div class="bigplay" id="bigplay"><span><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></span></div>
+<div class="err" id="err">
+  <div class="ico">&#9835;</div>
+  <div>این فرمت صوتی در مرورگر پشتیبانی نمی&#39;شود.<br>می&#39;توانید فایل را دانلود کنید.</div>
+  <a class="dl" id="errDl" download>&#8681; دانلود فایل</a>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var NAME = __JSON_NAME__;
+  var a = document.getElementById("aa");
+  var $ = function(id){ return document.getElementById(id); };
+  var seek = $("seek"), track = $("track");
+  var played = $("played"), buf = $("buf"), knob = $("knob"), tip = $("tip");
+  var topbar = $("top"), bar = $("bar"), spin = $("spin"), bigplay = $("bigplay");
+  var errBox = $("err"), pop = $("ratePop"), volIn = $("vol");
+  var disc = $("disc"), meter = $("meter"), mctx = meter.getContext("2d");
+
+  var ICON_PLAY = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>';
+  var ICON_PAUSE = '<svg viewBox="0 0 24 24"><path d="M6 4h4v16H6zm8 0h4v16h-4z"/></svg>';
+  var ICON_VOL = '<svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3z"/>'
+    + '<path d="M16.5 12a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4z" opacity=".9"/>'
+    + '<path d="M14 3.2v2.1a6.8 6.8 0 0 1 0 13.4v2.1a8.9 8.9 0 0 0 0-17.6z" opacity=".55"/></svg>';
+  var ICON_MUTE = '<svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3z"/>'
+    + '<path d="M16.5 9.1l1.4 1.4 1.4-1.4 1.1 1.1-1.4 1.4 1.4 1.4-1.1 1.1-1.4-1.4'
+    + '1.4 1.4-1.1 1.1-1.4-1.4-1.4 1.4-1.1-1.1 1.4-1.4-1.4-1.4z"/></svg>';
+  var ICON_REP1 = '<path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/>';
+  var ICON_REPALL = '<path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4zm-4-2v-3H6v2h5v1h2z"/>';
+
+  var hideTimer = null;
+
+  function fmt(t){
+    if(!isFinite(t) || t < 0) t = 0;
+    var s = Math.floor(t % 60), m = Math.floor(t / 60) % 60, h = Math.floor(t / 3600);
+    var mm = (h ? String(m).padStart(2,"0") : String(m));
+    return (h ? h + ":" : "") + mm + ":" + String(s).padStart(2,"0");
+  }
+  function store(k, val){
+    try { if(val === undefined) return localStorage.getItem(k);
+         localStorage.setItem(k, val); } catch(e){ return null; }
+  }
+  function clamp(v2, a, b){ return v2 < a ? a : (v2 > b ? b : v2); }
+
+  function wake(){
+    topbar.classList.remove("hide");
+    bar.classList.remove("hide");
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(function(){
+      if(!a.paused && !pop.classList.contains("open")){
+        topbar.classList.add("hide");
+        bar.classList.add("hide");
+      }
+    }, 2600);
+  }
+
+  function setIcon(){
+    $("playBtn").innerHTML = a.paused ? ICON_PLAY : ICON_PAUSE;
+    bigplay.classList.toggle("on", a.paused && !errBox.classList.contains("on"));
+  }
+  function play(){ wakeAudio(); var p = a.play(); if(p && p.catch) p.catch(function(){}); }
+  function toggle(){ if(a.paused) play(); else a.pause(); }
+  function seekBy(d){ a.currentTime = clamp(a.currentTime + d, 0, a.duration || 0); }
+  function seekTo(r){ if(isFinite(a.duration)) a.currentTime = clamp(r, 0, 1) * a.duration; }
+
+  function paint(){
+    var d = a.duration || 0, c = a.currentTime || 0;
+    var p = d > 0 ? clamp(c / d, 0, 1) : 0;
+    played.style.width = (p * 100) + "%";
+    knob.style.left = (p * 100) + "%";
+    $("cur").textContent = fmt(c);
+    if(isFinite(d)) $("dur").textContent = fmt(d);
+    var b = a.buffered, end = 0;
+    for(var i = 0; i < b.length; i++){ if(b.start(i) <= c + 0.1) end = b.end(i); }
+    buf.style.width = (d > 0 ? clamp(end / d, 0, 1) * 100 : 0) + "%";
+  }
+
+/* ---- radial level meter (falls back to a quiet idle ring) ---- */
+  var analyser = null, freqData = null, spinAngle = 0, graphDone = false, _ac = null;
+  function aCtx(){
+    if(!_ac){
+      var C = window.AudioContext || window.webkitAudioContext;
+      _ac = new C();
+    }
+    return _ac;
+  }
+  /* Wire the element into an analyser once. Doing it twice for the same element
+     throws, and a throw here would silently kill the meter on the second play. */
+  function initMeter(){
+    if(graphDone) return;
+    graphDone = true;
+    try {
+      var Ctx = window.AudioContext || window.webkitAudioContext;
+      if(!Ctx) return;
+      var ctx = aCtx();
+      var src = ctx.createMediaElementSource(a);
+      analyser = ctx.createAnalyser();
+      analyser.fftSize = 128;
+      analyser.smoothingTimeConstant = 0.75;
+      src.connect(analyser);
+      analyser.connect(ctx.destination);
+      freqData = new Uint8Array(analyser.frequencyBinCount);
+    } catch(e){ analyser = null; }
+  }
+  /* The context stays suspended until the browser allows audio, so every place
+     playback can begin tries to wake it. */
+  function wakeAudio(){
+    try {
+      initMeter();
+      if(_ac && _ac.state === "suspended") _ac.resume();
+    } catch(e){}
+  }
+  function drawMeter(){
+    var w = meter.width, h = meter.height, cx = w / 2, cy = h / 2;
+    mctx.clearRect(0, 0, w, h);
+    if(analyser && freqData){
+      analyser.getByteFrequencyData(freqData);
+      var bars = 56;
+      mctx.lineWidth = Math.max(2, w / 150);
+      for(var i = 0; i < bars; i++){
+        var v = freqData[Math.floor(i * freqData.length / bars)] / 255;
+        var ang = (i / bars) * Math.PI * 2 - Math.PI / 2;
+        var r0 = w * 0.30, r1 = r0 + v * w * 0.14;
+        mctx.strokeStyle = "rgba(96,165,250," + (0.25 + v * 0.75) + ")";
+        mctx.beginPath();
+        mctx.moveTo(cx + Math.cos(ang) * r0, cy + Math.sin(ang) * r0);
+        mctx.lineTo(cx + Math.cos(ang) * r1, cy + Math.sin(ang) * r1);
+        mctx.stroke();
+      }
+    } else {
+      mctx.strokeStyle = "rgba(148,163,184,.22)";
+      mctx.lineWidth = Math.max(2, w / 180);
+      mctx.beginPath();
+      mctx.arc(cx, cy, w * 0.34, 0, Math.PI * 2);
+      mctx.stroke();
+    }
+    /* which mode we are in, so the state is observable while debugging */
+    meter.setAttribute("data-mode", (analyser && freqData) ? "bars" : "idle");
+    if(!a.paused){ spinAngle += 2.2; disc.style.transform = "rotate(" + spinAngle + "deg)"; }
+    requestAnimationFrame(drawMeter);
+  }
+
+  function ratioAt(clientX){
+    var r = track.getBoundingClientRect();
+    return clamp((clientX - r.left) / Math.max(1, r.width), 0, 1);
+  }
+  function hover(clientX){
+    var r = ratioAt(clientX), d = a.duration || 0;
+    tip.style.left = (r * 100) + "%";
+    tip.textContent = d > 0 ? fmt(r * d) : "0:00";
+  }
+  var dragging = false;
+  function down(ev){
+    if(errBox.classList.contains("on")) return;
+    dragging = true;
+    seek.classList.add("drag");
+    if(ev.target.setPointerCapture) { try { ev.target.setPointerCapture(ev.pointerId); } catch(e){} }
+    hover(ev.clientX);
+    ev.preventDefault();
+    wake();
+  }
+  function move(ev){
+    if(!dragging) return;
+    hover(ev.clientX);
+    seekTo(ratioAt(ev.clientX));
+    ev.preventDefault();
+  }
+  function up(ev){
+    if(!dragging) return;
+    dragging = false;
+    seek.classList.remove("drag");
+    if(ev) { try { seekTo(ratioAt(ev.clientX)); } catch(e){} }
+    wake();
+  }
+  seek.addEventListener("pointerdown", down);
+  seek.addEventListener("pointermove", function(ev){
+    if(dragging) move(ev); else { hover(ev.clientX); wake(); }
+  });
+  window.addEventListener("pointermove", function(ev){
+    if(dragging) move(ev);
+    wake();
+  });
+  window.addEventListener("pointerup", up);
+  window.addEventListener("pointercancel", up);
+
+  function paintVol(){
+    var m = a.muted || a.volume === 0;
+    $("muteBtn").innerHTML = m ? ICON_MUTE : ICON_VOL;
+    if(!m) volIn.value = Math.round(a.volume * 100);
+    volIn.style.background = "linear-gradient(90deg,#60a5fa "
+      + (m ? 0 : Math.round(a.volume * 100)) + "%,rgba(255,255,255,.28) "
+      + (m ? 0 : Math.round(a.volume * 100)) + "%)";
+  }
+  function setVol(x){
+    x = clamp(x, 0, 1);
+    a.volume = x;
+    a.muted = (x === 0);
+    paintVol();
+    store("bs-vol", String(x));
+  }
+  volIn.addEventListener("input", function(){ setVol(volIn.value / 100); });
+  $("muteBtn").addEventListener("click", function(){
+    if(a.muted || a.volume === 0){ var s = store("bs-vol"); setVol(s ? parseFloat(s) : 1); }
+    else { store("bs-vol", String(a.volume)); a.muted = true; paintVol(); }
+    wake();
+  });
+
+  $("rateBtn").addEventListener("click", function(ev){
+    ev.stopPropagation();
+    pop.classList.toggle("open");
+    wake();
+  });
+  pop.addEventListener("click", function(ev){
+    var b = ev.target.closest("button[data-r]");
+    if(!b) return;
+    setRate(parseFloat(b.getAttribute("data-r")));
+  });
+  function setRate(r){
+    a.playbackRate = r;
+    store("bs-rate", String(r));
+    [].forEach.call(pop.querySelectorAll("button"), function(b){
+      b.classList.toggle("on", parseFloat(b.getAttribute("data-r")) === r);
+    });
+    pop.classList.remove("open");
+  }
+
+  /* repeat: off -> all -> one */
+  var REPEAT_MODES = ["off", "all", "one"];
+  var repIdx = REPEAT_MODES.indexOf(store("bs-repeat") || "off");
+  if(repIdx < 0) repIdx = 0;
+  function paintRepeat(){
+    var m = REPEAT_MODES[repIdx];
+    a.loop = (m === "one");
+    $("repeatBtn").classList.toggle("on", m !== "off");
+    $("repeatBtn").classList.toggle("dim", m === "off");
+    $("repIcon").innerHTML = (m === "one") ? ICON_REP1 : ICON_REPALL;
+    store("bs-repeat", m);
+  }
+  $("repeatBtn").addEventListener("click", function(){
+    repIdx = (repIdx + 1) % REPEAT_MODES.length;
+    paintRepeat();
+    wake();
+  });
+
+
+  function toast(msg){
+    var d = document.createElement("div");
+    d.textContent = msg;
+    d.style.cssText = "position:fixed;top:80px;left:50%;transform:translateX(-50%);"
+      + "padding:10px 18px;border-radius:12px;background:rgba(14,18,28,.95);"
+      + "border:1px solid rgba(255,255,255,.14);font-size:13px;z-index:50;"
+      + "box-shadow:0 14px 40px rgba(0,0,0,.5)";
+    document.body.appendChild(d);
+    setTimeout(function(){ d.remove(); }, 2200);
+  }
+
+  $("playBtn").addEventListener("click", function(){ wakeAudio(); toggle(); wake(); });
+  $("back10").addEventListener("click", function(){ seekBy(-10); wake(); });
+  $("fwd10").addEventListener("click", function(){ seekBy(10); wake(); });
+  bigplay.addEventListener("click", function(){ wakeAudio(); toggle(); wake(); });
+  document.getElementById("stage").addEventListener("click", function(ev){
+    if(ev.target === disc || ev.target === disc.parentNode) { wakeAudio(); toggle(); }
+    wake();
+  });
+  document.addEventListener("click", function(ev){
+    if(!ev.target.closest(".menu")) pop.classList.remove("open");
+  });
+
+  document.addEventListener("keydown", function(ev){
+    var tag = (ev.target.tagName || "").toLowerCase();
+    if(tag === "input" || tag === "textarea") return;
+    var k = ev.key;
+    if(k === " " || k === "k" || k === "K"){ toggle(); }
+    else if(k === "ArrowRight"){ seekBy(ev.shiftKey ? 5 : 10); }
+    else if(k === "ArrowLeft"){ seekBy(ev.shiftKey ? -5 : -10); }
+    else if(k === "j" || k === "J"){ seekBy(-10); }
+    else if(k === "l" || k === "L"){ seekBy(10); }
+    else if(k === "ArrowUp"){ setVol(a.volume + 0.05); }
+    else if(k === "ArrowDown"){ setVol(a.volume - 0.05); }
+    else if(k === "m" || k === "M"){ $("muteBtn").click(); }
+    else if(k === "r" || k === "R"){ $("repeatBtn").click(); }
+    else if(k === "Home"){ seekTo(0); }
+    else if(k === "End"){ seekTo(0.999); }
+    else if(k === ">"){ setRate(clamp(+(a.playbackRate + 0.25).toFixed(2), 0.5, 2)); }
+    else if(k === "<"){ setRate(clamp(+(a.playbackRate - 0.25).toFixed(2), 0.5, 2)); }
+    else if(k >= "0" && k <= "9"){ seekBy((+k / 10 - a.currentTime / (a.duration || 1)) * (a.duration || 0)); }
+    else return;
+    ev.preventDefault();
+    wake();
+  });
+
+  a.addEventListener("play", function(){
+    setIcon(); wakeAudio(); wake();
+  });
+  a.addEventListener("pause", function(){ setIcon(); wake(); });
+  a.addEventListener("ended", function(){
+    setIcon();
+    topbar.classList.remove("hide"); bar.classList.remove("hide");
+    if(REPEAT_MODES[repIdx] === "all"){ a.currentTime = 0; play(); }
+  });
+  a.addEventListener("timeupdate", paint);
+  a.addEventListener("durationchange", paint);
+  a.addEventListener("progress", paint);
+  a.addEventListener("waiting", function(){ spin.classList.add("on"); });
+  a.addEventListener("stalled", function(){ spin.classList.add("on"); });
+  a.addEventListener("seeking", function(){ spin.classList.add("on"); });
+  a.addEventListener("canplay", function(){ spin.classList.remove("on"); paint(); });
+  a.addEventListener("playing", function(){ spin.classList.remove("on"); });
+  a.addEventListener("volumechange", paintVol);
+  a.addEventListener("ratechange", function(){
+    [].forEach.call(pop.querySelectorAll("button"), function(b){
+      b.classList.toggle("on", parseFloat(b.getAttribute("data-r")) === a.playbackRate);
+    });
+  });
+  a.addEventListener("error", function(){
+    spin.classList.remove("on");
+    errBox.classList.add("on");
+    topbar.classList.remove("hide");
+    bar.classList.add("hide");
+  });
+
+  var dl = $("dlBtn"), er = $("errDl");
+  dl.href = location.pathname;
+  dl.setAttribute("download", NAME);
+  er.href = location.pathname;
+  er.setAttribute("download", NAME);
+  window.closeViewerTab = function(ev){
+    if(ev) ev.preventDefault();
+    try { window.close(); } catch(e){}
+    setTimeout(function(){
+      try { if(!window.closed) history.back(); }
+      catch(e2){ location.href = location.pathname.replace(/[^/]*$/,"") || "/"; }
+    }, 80);
+  };
+
+  var sv = parseFloat(store("bs-vol"));
+  a.volume = isFinite(sv) ? clamp(sv, 0, 1) : 1;
+  var sr = parseFloat(store("bs-rate"));
+  if(isFinite(sr) && sr >= 0.5 && sr <= 2) a.playbackRate = sr;
+  a.muted = false;
+  paintVol();
+  paintRepeat();
+  setIcon();
+  paint();
+  drawMeter();
+  wake();
+  play();
+})();
+</script>
+</body>
+</html>
+"""
+
 PLAYER_HTML = """<!DOCTYPE html>
 <html lang="fa" dir="ltr">
 <head>
@@ -2946,13 +3540,14 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
             return self._render_editor_from_neon(entry, store)
         if query.get("inline") or query.get("raw"):
             ext = Path(entry.name).suffix.lower()
-            img_exts = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".bmp", ".avif"}
-            vid_exts = {".mp4", ".webm", ".ogg", ".ogv", ".mov", ".mkv", ".avi", ".m4v", ".flv", ".wmv"}
             virtual = DOWNLOADS_DIR / rel
-            if ext in img_exts and not query.get("raw"):
-                return self._render_image_viewer(virtual)
-            if ext in vid_exts and not query.get("raw"):
-                return self._render_video_viewer(virtual)
+            if not query.get("raw"):
+                if ext in IMG_EXTS:
+                    return self._render_image_viewer(virtual)
+                if ext in AUD_EXTS:
+                    return self._render_audio_viewer(virtual)
+                if ext in VID_EXTS:
+                    return self._render_video_viewer(virtual)
 
         try:
             url = store.download_url(
@@ -3113,14 +3708,39 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
             return self._render_editor(path)
         if query.get("inline"):
             ext = path.suffix.lower()
-            img_exts = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".bmp", ".avif"}
-            vid_exts = {".mp4", ".webm", ".ogg", ".ogv", ".mov", ".mkv", ".avi", ".m4v", ".flv", ".wmv"}
-            if ext in img_exts:
+            if ext in IMG_EXTS:
                 return self._render_image_viewer(path)
-            if ext in vid_exts:
+            if ext in AUD_EXTS:
+                return self._render_audio_viewer(path)
+            if ext in VID_EXTS:
                 return self._render_video_viewer(path)
             return self._send_file(path, inline=True)
         return self._send_file(path)
+
+    def _send_viewer_html(self, page: str):
+        """Send a standalone viewer page (gzipped when the client accepts it)."""
+        data = page.encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        accept_enc = (self.headers.get("Accept-Encoding") or "").lower()
+        if "gzip" in accept_enc:
+            data = gzip.compress(data, compresslevel=5)
+            self.send_header("Content-Encoding", "gzip")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        return io.BytesIO(data)
+
+    @staticmethod
+    def _viewer_page(template: str, path: Path, size: int) -> str:
+        """Fill a viewer template for *path*."""
+        return (
+            template
+            .replace("__NAME__", html.escape(path.name))
+            .replace("__SIZE__", html.escape(human_size(size)))
+            .replace("__SRC__", html.escape(urllib.parse.quote(path.name)) + "?raw=1")
+            .replace("__JSON_NAME__", json.dumps(path.name))
+        )
 
     def _render_video_viewer(self, path: Path):
             """Serve the dedicated fullscreen video player page."""
@@ -3128,24 +3748,19 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
             if st is None:
                 self.send_error(HTTPStatus.NOT_FOUND, "File not found")
                 return None
-            page = (
-                PLAYER_HTML
-                .replace("__NAME__", html.escape(path.name))
-                .replace("__SIZE__", html.escape(human_size(st.st_size)))
-                .replace("__SRC__", html.escape(urllib.parse.quote(path.name)) + "?raw=1")
-                .replace("__JSON_NAME__", json.dumps(path.name))
+            return self._send_viewer_html(
+                self._viewer_page(PLAYER_HTML, path, st.st_size)
             )
-            data = page.encode("utf-8")
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Cache-Control", "no-cache")
-            accept_enc = (self.headers.get("Accept-Encoding") or "").lower()
-            if "gzip" in accept_enc:
-                data = gzip.compress(data, compresslevel=5)
-                self.send_header("Content-Encoding", "gzip")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            return io.BytesIO(data)
+
+    def _render_audio_viewer(self, path: Path):
+            """Serve the dedicated music player page."""
+            st = self._entry_stat(path)
+            if st is None:
+                self.send_error(HTTPStatus.NOT_FOUND, "File not found")
+                return None
+            return self._send_viewer_html(
+                self._viewer_page(AUDIO_HTML, path, st.st_size)
+            )
 
     def _render_image_viewer(self, path: Path):
         """Serve an image viewer page with a top download button."""
@@ -6047,7 +6662,9 @@ var IMG_EXT = {{png:1,jpg:1,jpeg:1,gif:1,webp:1,svg:1,ico:1,bmp:1,avif:1}};
 /* same ext -> badge map the server used to paint the real rows, so a pending
    upload looks exactly like the file it will become */
 var FILE_BADGES = {json.dumps({k: list(v) for k, v in _FILE_BADGES.items()})};
-var VID_EXT = {{mp4:1,webm:1,ogg:1,ogv:1,mov:1,mkv:1,avi:1,m4v:1,flv:1,wmv:1}};
+var VID_EXT = {{mp4:1,webm:1,ogv:1,mov:1,mkv:1,avi:1,m4v:1,flv:1,wmv:1}};
+var AUD_EXT = {{mp3:1,wav:1,ogg:1,oga:1,opus:1,m4a:1,m4b:1,aac:1,
+  flac:1,wma:1,aif:1,aiff:1,mid:1,midi:1}};
 var TEXT_EXT = {{txt:1,html:1,htm:1,css:1,js:1,json:1,md:1,py:1,xml:1,yml:1,yaml:1,
   csv:1,log:1,sh:1,bat:1,ps1:1,ts:1,jsx:1,tsx:1,vue:1,php:1,java:1,c:1,cpp:1,h:1,
   go:1,rs:1,sql:1,ini:1,cfg:1,conf:1,toml:1,env:1,txt:1,rb:1,pl:1,r:1,m:1,swift:1,
@@ -6186,7 +6803,8 @@ function openFileRow(row) {{
   var sep = href.indexOf("?") >= 0 ? "&" : "?";
   if (IMG_EXT[ext]) {{
     window.open(href + sep + "inline=1", "_blank");
-  }} else if (VID_EXT[ext]) {{
+  }} else if (VID_EXT[ext] || AUD_EXT[ext]) {{
+    /* both get a dedicated player page; ?inline=1 decides which one */
     window.open(href + sep + "inline=1", "_blank");
   }} else {{
     window.open(href + sep + "edit=1", "_blank");
