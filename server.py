@@ -4524,9 +4524,13 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
     user-select: none;
     -webkit-user-select: none;
   }}
-  input, textarea, select, [contenteditable], .flabel, .search input {{
+  input, textarea, select, [contenteditable], .search input {{
     user-select: text;
     -webkit-user-select: text;
+  }}
+  .flabel, .fsub, .fsize, .fmtime {{
+    user-select: none;
+    -webkit-user-select: none;
   }}
 
   :root, [data-theme="dark"] {{
@@ -7324,8 +7328,9 @@ function _upShowIcon(it) {{
   var cls = hit ? hit[0] : "file";
   var label = hit ? hit[1] : "FILE";
   /* drop the flat placeholder that stood in while the bytes were in flight */
-  while (ring.firstChild && ring.firstChild.tagName !== "svg") {{
-    ring.removeChild(ring.firstChild);
+  var kids = Array.prototype.slice.call(ring.children);
+  for (var k = 0; k < kids.length; k++) {{
+    if (kids[k].tagName.toLowerCase() !== "svg") ring.removeChild(kids[k]);
   }}
   var href = encodeURIComponent(it.file.name);
   var box = document.createElement("span");
