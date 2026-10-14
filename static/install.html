@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<script>try{var t=localStorage.getItem('bs-theme');var TH=['dark','light','blue','purple','orange','green','sunset'];if(TH.indexOf(t)>=0)document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__NAME__ - Black Server</title>
+<link rel="icon" href="/favicon.ico" sizes="8681">
+<style>
+:root{
+  --bg:#070b14;--panel:#0e1628;--panel2:#111c33;--border:#1c2d4f;--border2:#243b66;
+  --text:#e8eefc;--text2:#8ba0c5;--text3:#5a719e;
+  --blue:#3b82f6;--blue2:#2563eb;--green:#22c55e;
+}
+html[data-theme=light]{--bg:#f3f5f9;--panel:#ffffff;--panel2:#eef1f6;--border:#d9dee8;--border2:#c8d0de;
+  --text:#111827;--text2:#4b5563;--text3:#6b7280;}
+html[data-theme=blue]{--bg:#06101f;--panel:#0b1a30;}
+html[data-theme=purple]{--bg:#0a0714;--panel:#150e28;}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:
+    radial-gradient(900px 500px at 15% -10%, rgba(59,130,246,.18), transparent 60%),
+    radial-gradient(700px 460px at 110% 110%, rgba(139,92,246,.16), transparent 60%),
+    var(--bg);
+  color:var(--text);
+  font-family:'Segoe UI',system-ui,-apple-system,'Noto Sans Arabic',sans-serif;
+  min-height:100%;display:flex;align-items:center;justify-content:center;
+  padding:24px 16px;overflow-x:hidden;
+}
+.card{
+  width:min(460px,100%);background:var(--panel);border:1px solid var(--border);
+  border-radius:24px;padding:34px 24px 26px;text-align:center;
+  box-shadow:0 26px 70px rgba(0,0,0,.45);
+}
+.icon{
+  width:88px;height:88px;margin:0 auto 16px;border-radius:26px;
+  background:linear-gradient(135deg,var(--blue),var(--blue2));
+  display:flex;align-items:center;justify-content:center;
+  box-shadow:0 14px 34px rgba(59,130,246,.42);
+}
+.icon svg{width:44px;height:44px;stroke:#fff;fill:none;stroke-width:1.7;
+  stroke-linecap:round;stroke-linejoin:round}
+.fname{
+  font-size:15.5px;font-weight:800;direction:ltr;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;
+}
+.meta{margin-top:6px;font-size:12.5px;color:var(--text3);direction:ltr}
+.msg{margin-top:20px;font-size:16.5px;font-weight:800}
+.hint{margin-top:9px;font-size:12.5px;line-height:1.9;color:var(--text3)}
+.dl{
+  display:flex;align-items:center;justify-content:center;gap:10px;
+  width:100%;margin-top:20px;padding:15px 18px;border:none;border-radius:15px;
+  background:linear-gradient(135deg,var(--blue),var(--blue2));color:#fff;
+  font-size:16px;font-weight:800;font-family:inherit;cursor:pointer;
+  text-decoration:none;box-shadow:0 12px 30px rgba(59,130,246,.38);
+  transition:transform .15s,filter .15s;
+}
+.dl:hover{transform:translateY(-2px);filter:brightness(1.08)}
+.dl:active{transform:translateY(0)}
+.dl svg{width:20px;height:20px;stroke:#fff;fill:none;stroke-width:2.2;
+  stroke-linecap:round;stroke-linejoin:round}
+.back{
+  display:inline-flex;align-items:center;justify-content:center;gap:8px;
+  margin-top:14px;width:100%;padding:11px 16px;border:1px solid var(--border2);
+  border-radius:13px;background:var(--panel2);color:var(--text2);
+  font-size:13.5px;font-weight:700;font-family:inherit;cursor:pointer;
+  transition:all .15s;
+}
+.back:hover{border-color:var(--blue);color:var(--text)}
+@media (max-width:420px){
+  .card{padding:26px 16px 20px;border-radius:20px}
+  .icon{width:72px;height:72px;border-radius:22px}
+  .icon svg{width:36px;height:36px}
+  .msg{font-size:15.5px}
+}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="icon">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 3v11"/><path d="M8 10l4 4 4-4"/>
+      <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
+    </svg>
+  </div>
+  <div class="fname" dir="ltr" id="fname">__NAME__</div>
+  <div class="meta" id="fmeta">__SIZE__</div>
+
+  <p class="msg">برای دانلود روی کلید زیر بزنید</p>
+  <p class="hint">این فایل یک برنامهٔ قابل نصب است؛ پس از دانلود روی گوشی یا لپ‌تاپ خود آن را باز کنید.</p>
+
+  <a class="dl" id="dlBtn" href="__DL__">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 3v12"/><path d="M7 11l5 5 5-5"/><path d="M5 21h14"/>
+    </svg>
+    دانلود فایل
+  </a>
+
+  <button class="back" type="button" onclick="goBack()">&#8592; بازگشت به فایل‌ها</button>
+</div>
+<script>
+var NAME = __JSON_NAME__;
+(function(){
+  var a = document.getElementById('dlBtn');
+  a.setAttribute('download', NAME);
+})();
+function goBack(){
+  try { window.close(); } catch(e){}
+  setTimeout(function(){
+    try { if (!window.closed) history.back(); }
+    catch(e2){ location.href = location.pathname.replace(/[^/]*$/,'') || '/'; }
+  }, 80);
+}
+</script>
+</body>
+</html>

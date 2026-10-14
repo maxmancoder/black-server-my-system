@@ -45,6 +45,7 @@ launched, not the rest of the project.
 from __future__ import annotations
 
 import argparse
+import base64
 import functools
 import gzip
 import html
@@ -1029,6 +1030,30 @@ _FILE_BADGES: dict[str, tuple[str, str]] = {
     ".mp3": ("aud", "MP3"),
     ".py": ("py", "PY"),
     ".exe": ("exe", "EXE"),
+    # office documents -> dedicated editor pages
+    ".doc": ("word", "DOC"),
+    ".docx": ("word", "DOC"),
+    ".docm": ("word", "DOC"),
+    ".dotx": ("word", "DOT"),
+    ".odt": ("word", "ODT"),
+    ".rtf": ("word", "RTF"),
+    ".xls": ("sheet", "XLS"),
+    ".xlsx": ("sheet", "XLS"),
+    ".xlsm": ("sheet", "XLS"),
+    ".xlsb": ("sheet", "XLS"),
+    ".ods": ("sheet", "ODS"),
+    ".csv": ("sheet", "CSV"),
+    ".tsv": ("sheet", "TSV"),
+    ".ppt": ("slide", "PPT"),
+    ".pptx": ("slide", "PPT"),
+    ".pptm": ("slide", "PPT"),
+    ".odp": ("slide", "ODP"),
+    # installers -> download page
+    ".apk": ("apk", "APK"),
+    ".msi": ("exe", "MSI"),
+    ".dmg": ("exe", "DMG"),
+    ".deb": ("exe", "DEB"),
+    ".rpm": ("exe", "RPM"),
 }
 
 
@@ -1054,6 +1079,26 @@ AUD_EXTS: frozenset = frozenset({
 })
 # Pillow cannot read these, so they are scaled by the browser instead.
 _NO_RESIZE: frozenset = frozenset({".svg", ".gif", ".avif"})
+
+# Office documents open in the dedicated Word / Excel / PowerPoint style editor.
+OFFICE_KIND: dict[str, str] = {
+    ".docx": "word", ".docm": "word", ".dotx": "word", ".dotm": "word",
+    ".doc": "word", ".rtf": "word", ".odt": "word", ".pages": "word",
+    ".wpd": "word", ".sxw": "word",
+    ".xlsx": "sheet", ".xlsm": "sheet", ".xlsb": "sheet", ".xls": "sheet",
+    ".ods": "sheet", ".csv": "sheet", ".tsv": "sheet",
+    ".pptx": "slide", ".pptm": "slide", ".potx": "slide", ".ppsx": "slide",
+    ".ppt": "slide", ".odp": "slide",
+}
+OFFICE_EXTS: frozenset = frozenset(OFFICE_KIND)
+
+# Programs for phones and computers: double-clicking one shows a download page
+# instead of trying to open the bytes in a viewer.
+INSTALL_EXTS: frozenset = frozenset({
+    ".exe", ".msi", ".msix", ".msixbundle", ".appx", ".appxbundle",
+    ".apk", ".aab", ".ipa", ".deb", ".rpm", ".appimage", ".dmg", ".pkg",
+    ".run", ".desktop",
+})
 
 
 def _row_icon(ext: str, href: str) -> str:
@@ -1243,6 +1288,27 @@ def _sidebar_tree(current: Path) -> str:
     )
     _SIDEBAR_CACHE.update({"html": html_out, "ts": now, "for": cur})
     return html_out
+
+
+# Document pages (the office editor and the installer download page) are much
+# larger than the players below - the office editor is a small application of
+# its own - so they ship as files in ./static and are read once at start-up.
+# The same __NAME__/__SIZE__/__SRC__/__JSON_NAME__ tokens (plus __DL__,
+# __KIND__ and __EXT__) are filled in per request by ``_doc_page``.
+def _load_page_template(name: str) -> str:
+    try:
+        return (PROJECT_ROOT / "static" / name).read_text(encoding="utf-8")
+    except OSError:
+        logger.warning("page template %s is missing from ./static", name)
+        return (
+            '<!DOCTYPE html><html lang="fa" dir="rtl"><body '
+            'style="font-family:sans-serif;text-align:center;padding:40px">'
+            "صفحه در دسترس نیست</body></html>"
+        )
+
+
+INSTALL_HTML: str = _load_page_template("install.html")
+OFFICE_HTML: str = _load_page_template("office.html")
 
 
 # Dedicated video player page. Kept as one template so the markup, the styles and
@@ -3548,6 +3614,14 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
                     return self._render_audio_viewer(virtual)
                 if ext in VID_EXTS:
                     return self._render_video_viewer(virtual)
+                if ext in INSTALL_EXTS:
+                    return self._render_install_page(virtual)
+                if ext in OFFICE_EXTS:
+                    return self._render_office_page(virtual)
+            elif query.get("proxy"):
+                # The office editor reads the bytes with fetch(); hand them over
+                # from here so it never needs cross-origin access to the bucket.
+                return self._send_neon_bytes(store, entry)
 
         try:
             url = store.download_url(
@@ -3663,6 +3737,8 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
         raw_path = urllib.parse.urlparse(self.path).path
         if raw_path in ("/favicon.ico", "/favicon.png"):
             return self._send_favicon()
+        if raw_path.startswith("/static/"):
+            return self._send_static(raw_path)
 
         query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         store = storage()
@@ -3714,6 +3790,10 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
                 return self._render_audio_viewer(path)
             if ext in VID_EXTS:
                 return self._render_video_viewer(path)
+            if ext in INSTALL_EXTS:
+                return self._render_install_page(path)
+            if ext in OFFICE_EXTS:
+                return self._render_office_page(path)
             return self._send_file(path, inline=True)
         return self._send_file(path)
 
@@ -3740,6 +3820,22 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
             .replace("__SIZE__", html.escape(human_size(size)))
             .replace("__SRC__", html.escape(urllib.parse.quote(path.name)) + "?raw=1")
             .replace("__JSON_NAME__", json.dumps(path.name))
+        )
+
+    @classmethod
+    def _doc_page(cls, template: str, path: Path, size: int, kind: str = "") -> str:
+        """Fill a document-page template (office editor / installer page).
+
+        Adds the keys the viewer template does not need: ``__DL__`` (a plain
+        URL that downloads as an attachment), ``__KIND__`` (word/sheet/slide)
+        and ``__EXT__`` (the lower-case extension without the dot).
+        """
+        page = cls._viewer_page(template, path, size)
+        return (
+            page
+            .replace("__DL__", html.escape(urllib.parse.quote(path.name)))
+            .replace("__KIND__", html.escape(kind))
+            .replace("__EXT__", html.escape(path.suffix.lower().lstrip(".")))
         )
 
     def _render_video_viewer(self, path: Path):
@@ -3845,6 +3941,25 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         return io.BytesIO(data)
+
+    def _render_install_page(self, path: Path):
+        """Centered "tap to download" page for installer files (.exe, .apk, ...)."""
+        st = self._entry_stat(path)
+        if st is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "File not found")
+            return None
+        return self._send_viewer_html(self._doc_page(INSTALL_HTML, path, st.st_size))
+
+    def _render_office_page(self, path: Path):
+        """Word / Excel / PowerPoint style editor for an office document."""
+        st = self._entry_stat(path)
+        if st is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "File not found")
+            return None
+        kind = OFFICE_KIND.get(path.suffix.lower(), "word")
+        return self._send_viewer_html(
+            self._doc_page(OFFICE_HTML, path, st.st_size, kind)
+        )
 
     def _send_zip_items(self, directory: Path, names: list):
         """Stream a ZIP of selected items inside *directory*."""
@@ -4083,11 +4198,23 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
             self._json_response(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad file"})
             return
         payload = self._payload()
+        # Text comes as ``content``; the office editors send generated binary
+        # (docx/xlsx/pptx) as ``content_b64`` so any format round-trips.
         content = payload.get("content", "")
-        if not isinstance(content, str):
+        b64 = payload.get("content_b64")
+        if isinstance(b64, str) and b64:
+            try:
+                data = base64.b64decode(b64, validate=True)
+            except (ValueError, TypeError):
+                self._json_response(
+                    HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad base64"}
+                )
+                return
+        elif isinstance(content, str):
+            data = content.encode("utf-8")
+        else:
             self._json_response(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad content"})
             return
-        data = content.encode("utf-8")
         if len(data) > 10 * 1024 * 1024:
             self._json_response(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "file too large"})
             return
@@ -4124,6 +4251,65 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Type", "image/x-icon")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "public, max-age=86400")
+        self.end_headers()
+        return io.BytesIO(data)
+
+    def _send_static(self, raw_path: str):
+        """Serve a bundled asset from ``./static`` (vendor JS for the editors).
+
+        Stays inside the static root: any ``..`` segment that escapes it is a
+        404, exactly like the file root itself.
+        """
+        base = (PROJECT_ROOT / "static").resolve()
+        rel = urllib.parse.unquote(raw_path[len("/static/"):])
+        target = (base / rel).resolve() if rel else base
+        try:
+            target.relative_to(base)
+        except ValueError:
+            self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+            return None
+        if not target.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+            return None
+        try:
+            fobj = open(target, "rb")
+            size = os.fstat(fobj.fileno()).st_size
+        except OSError:
+            self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+            return None
+        self._bytes_to_send = size
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", self.guess_type(str(target)))
+        self.send_header("Content-Length", str(size))
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.end_headers()
+        return fobj
+
+    def _send_neon_bytes(self, store, entry):
+        """Stream one Neon object through this server (office editor fetch).
+
+        Media elements happily read a cross-origin presigned URL; ``fetch()``
+        does not, so documents that must be parsed in the browser come through
+        here instead of the bucket.
+        """
+        if entry.size > 256 * 1024 * 1024:
+            self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "File too large")
+            return None
+        try:
+            data = store.get_object(entry.key)["Body"].read()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("object read failed for %s", entry.key)
+            self.send_error(HTTPStatus.BAD_GATEWAY, f"storage error: {exc}")
+            return None
+        self._bytes_to_send = len(data)
+        self.send_response(HTTPStatus.OK)
+        self.send_header(
+            "Content-Type",
+            neon.guess_content_type(entry.name) or "application/octet-stream",
+        )
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Disposition", "inline")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         return io.BytesIO(data)
 
@@ -5324,6 +5510,10 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
   .badge.aud  {{ background: linear-gradient(135deg,#2dd4bf,#0d9488); font-size: 9px; }}
   .badge.py   {{ background: linear-gradient(135deg,#fbbf24,#f59e0b); }}
   .badge.exe  {{ background: linear-gradient(135deg,#94a3b8,#64748b); font-size: 9px; }}
+  .badge.word {{ background: linear-gradient(135deg,#60a5fa,#1d4ed8); font-size: 9px; }}
+  .badge.sheet {{ background: linear-gradient(135deg,#4ade80,#16a34a); font-size: 9px; }}
+  .badge.slide {{ background: linear-gradient(135deg,#fb923c,#ea580c); font-size: 9px; }}
+  .badge.apk  {{ background: linear-gradient(135deg,#34d399,#059669); font-size: 9px; }}
   .badge.file {{ background: linear-gradient(135deg,#64748b,#475569); font-size: 9px; }}
   .badge.folder {{
     background: linear-gradient(135deg,var(--folder-a),var(--folder-b));
@@ -5899,13 +6089,24 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
     .layout {{ grid-template-columns: 1fr; grid-template-rows: none; overflow: visible; }}
     .sidebar {{ display: none; }}
     .sidebar-resize {{ display: none; }}
+    /* Short list: the list flows with the page, so scrolling moves the whole
+       page (header, list and details together). A long list switches .center
+       to .list-scroll (set by fitMobileList) and scrolls only inside itself. */
     .center {{
       border-right: none;
-      height: calc(100dvh - 110px);
-      max-height: calc(100dvh - 110px);
-      min-height: 360px;
+      height: auto;
+      max-height: none;
+      min-height: 0;
+      overflow: visible;
+    }}
+    .center .tbody {{ flex: 0 0 auto; overflow-y: visible; }}
+    .center.list-scroll {{
+      height: var(--center-h, calc(100dvh - 110px));
+      max-height: var(--center-h, calc(100dvh - 110px));
+      min-height: 320px;
       overflow: hidden;
     }}
+    .center.list-scroll .tbody {{ flex: 1 1 auto; overflow-y: auto; }}
     .list-tools {{ padding: 8px 12px; }}
     .zoom-tools {{ display: none; }}
     .thead {{ padding: 7px 12px; }}
@@ -5934,11 +6135,7 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
     .scope-menu .sm-icon {{ width: 28px; height: 28px; font-size: 14px; }}
     .scope-menu .sm-desc {{ display: none; }}
     .scope-menu .sm-title {{ font-size: 12.5px; }}
-    .center {{
-      height: calc(100dvh - 90px);
-      max-height: calc(100dvh - 90px);
-      min-height: 320px;
-    }}
+    .center.list-scroll {{ min-height: 280px; }}
     .thead, .frow {{ grid-template-columns: 28px 1fr 40px; }}
     .thead .h-size, .frow .fsize {{ display: none; }}
     /* only the name and the buttons survive on a phone */
@@ -6468,6 +6665,43 @@ function isMobile() {{
   return window.matchMedia("(max-width: 980px)").matches;
 }}
 
+/* ===== MOBILE LIST FITTING =====
+   On a phone the list must behave in one of two ways:
+     * short list (nothing to scroll inside it) -> the list flows with the page,
+       so one gesture scrolls the whole page (header, list, details);
+     * long list -> the list area is pinned to the viewport (.list-scroll) and
+       only the rows scroll inside it.
+   fitMobileList() picks the mode; the observers below re-run it whenever the
+   rows or the viewport change. */
+var _fitPending = 0;
+function scheduleFitList() {{
+  if (_fitPending) return;
+  _fitPending = requestAnimationFrame(function() {{ _fitPending = 0; fitMobileList(); }});
+}}
+function fitMobileList() {{
+  var center = document.querySelector(".center");
+  var tb = document.getElementById("tbody");
+  if (!center || !tb) return;
+  if (!isMobile()) {{
+    center.classList.remove("list-scroll");
+    center.style.removeProperty("--center-h");
+    return;
+  }}
+  var wasPinned = center.classList.contains("list-scroll");
+  if (wasPinned) center.classList.remove("list-scroll");   /* measure natural height */
+  var top = center.getBoundingClientRect().top + (window.scrollY || window.pageYOffset || 0);
+  var avail = window.innerHeight - top - 12;
+  var need = center.offsetHeight;
+  /* hysteresis so the mobile URL bar showing/hiding cannot flap the mode */
+  var tooTall = need > avail + (wasPinned ? 48 : 0);
+  if (tooTall && avail > 200) {{
+    center.style.setProperty("--center-h", Math.round(avail) + "px");
+    center.classList.add("list-scroll");
+  }} else {{
+    center.style.removeProperty("--center-h");
+  }}
+}}
+
 var LAST_ANCHOR = null;
 
 function onRowClick(e, row) {{
@@ -6663,6 +6897,12 @@ function updateSelectionUI() {{
 }}
 
 var IMG_EXT = {{png:1,jpg:1,jpeg:1,gif:1,webp:1,svg:1,ico:1,bmp:1,avif:1}};
+/* office documents open in their own editor page, installers in a download
+   page — both are picked server-side from the same lists (?inline=1) */
+var OFFICE_EXT = {{}};
+{json.dumps([e.lstrip(".") for e in sorted(OFFICE_EXTS)])}.forEach(function(e) {{ OFFICE_EXT[e] = 1; }});
+var INSTALL_EXT = {{}};
+{json.dumps([e.lstrip(".") for e in sorted(INSTALL_EXTS)])}.forEach(function(e) {{ INSTALL_EXT[e] = 1; }});
 /* same ext -> badge map the server used to paint the real rows, so a pending
    upload looks exactly like the file it will become */
 var FILE_BADGES = {json.dumps({k: list(v) for k, v in _FILE_BADGES.items()})};
@@ -6809,6 +7049,10 @@ function openFileRow(row) {{
     window.open(href + sep + "inline=1", "_blank");
   }} else if (VID_EXT[ext] || AUD_EXT[ext]) {{
     /* both get a dedicated player page; ?inline=1 decides which one */
+    window.open(href + sep + "inline=1", "_blank");
+  }} else if (OFFICE_EXT[ext] || INSTALL_EXT[ext]) {{
+    /* office documents open in their editor page, installers on the
+       centered download page — both routed by extension server-side */
     window.open(href + sep + "inline=1", "_blank");
   }} else {{
     window.open(href + sep + "edit=1", "_blank");
@@ -7270,6 +7514,19 @@ function isTheme(v) {{ return THEMES.indexOf(v) >= 0; }}
   }} else {{
     initVideoPosters();
   }}
+  /* page vs list scrolling on phones: re-fit now, on resize and whenever rows
+     appear, disappear or get filtered */
+  fitMobileList();
+  window.addEventListener("resize", scheduleFitList);
+  window.addEventListener("orientationchange", scheduleFitList);
+  window.addEventListener("load", scheduleFitList);
+  try {{
+    var _fitWatch = new MutationObserver(scheduleFitList);
+    var _fitTb = document.getElementById("tbody");
+    if (_fitTb) _fitWatch.observe(_fitTb, {{ childList: true, subtree: true, attributes: true }});
+    var _fitCenter = document.querySelector(".center");
+    if (_fitCenter) _fitWatch.observe(_fitCenter, {{ attributes: true, attributeFilter: ["class"] }});
+  }} catch (err) {{}}
   /* the editor runs in its own tab and drops this key after a successful save;
      storage events only fire in the other tabs, which is exactly what we want */
   window.addEventListener("storage", function(e) {{
