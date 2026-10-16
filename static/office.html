@@ -439,6 +439,10 @@ function retry(task, tries){
     });
   });
 }
+/* Set when the file on the server has no bytes at all (or cannot be read as
+   the kind we expect). Such a file still opens - as an empty document the user
+   can type into and save, instead of a dead error screen. */
+var docEmpty = false;
 function fetchBytes(){
   return retry(function(){
     return fetch(BYTE_URL, {credentials: "same-origin", cache: "no-store"}).then(function(r){
@@ -446,13 +450,7 @@ function fetchBytes(){
       return r.arrayBuffer();
     });
   }).then(function(buf){
-    /* an empty upload is not a broken download - say so instead of letting
-       the zip library complain about a truncated file */
-    if (!buf || !buf.byteLength){
-      var e = new Error("فایل خالی است (۰ بایت)");
-      e.empty = true;
-      throw e;
-    }
+    docEmpty = !buf || !buf.byteLength;
     return buf;
   });
 }
@@ -512,10 +510,6 @@ function hideNotice(){ $("notice").hidden = true; }
    button sits above it so a second click is one step away. */
 function showOpenError(err){
   var msg = String((err && err.message) || err);
-  if (err && err.empty){
-    showNotice("این فایل خالی است", "حجم فایل صفر بایت است، پس چیزی برای نمایش نیست.", false);
-    return;
-  }
   /* a plain text file renamed to .docx/.xlsx/.pptx reaches the zip library
      and comes back as "Corrupted zip" - name the real problem */
   if (/corrupt|end of data|invalid signature|zip/i.test(msg)){
@@ -1737,6 +1731,7 @@ function wordBoot(){
   }).then(function(){
     setStatus("");
     $("footInfo").textContent = wordDoc.textContent.trim().length + " نویسه";
+    if (docEmpty) setStatus("فایل خالی بود؛ یک سند تازه باز شد", "ok");
     if (!canSaveWordAs){
       $("saveBtn").textContent = "دانلود نسخه ویرایش‌شده";
     }
@@ -1748,6 +1743,16 @@ function blocksWithLevels(){
   return blocksOf(wordDoc);
 }
 function wordInit(buf){
+  /* an empty (or unreadable) file opens as a blank document the user can type
+     into; saving writes a real one in the same format */
+  if (docEmpty){
+    wordDoc.innerHTML = "<p><br></p>";
+    canSaveWordAs = (EXT === "rtf") ? "rtf" :
+                    (EXT === "odt") ? null : "docx";
+    /* the writer still needs the zip library, so load it up front */
+    return canSaveWordAs === "rtf" ? Promise.resolve()
+                                   : loadScript("/static/vendor/jszip.min.js").then(function(){});
+  }
   if (EXT === "docx" || EXT === "docm" || EXT === "dotx" || EXT === "dotm"){
     return Promise.all([
       loadScript("/static/vendor/jszip.min.js"),
@@ -3843,19 +3848,27 @@ function sheetBoot(){
     $("footInfo").textContent = "فرمت پشتیبانی‌نشده";
     return Promise.resolve();
   }
-  return Promise.all([
-    loadScript("/static/vendor/jszip.min.js"),
-    loadScript("/static/vendor/xlsx.full.min.js")
-  ]).then(function(){
+  /* the xlsx writer always needs the zip library, the reader only for a file
+     that actually has content */
+  return loadScript("/static/vendor/jszip.min.js").then(function(){
     return fetchBytes();
   }).then(function(buf){
     setStatus("در حال باز کردن...");
-    sheetParse(buf);
+    if (docEmpty){
+      /* nothing to read: start from a clean workbook the user can fill in */
+      WB = {sheets: [newSheet("Sheet1")], cur: 0};
+    } else {
+      return loadScript("/static/vendor/xlsx.full.min.js").then(function(){
+        sheetParse(buf);
+      });
+    }
+  }).then(function(){
     recalcAll();
     renderTabs();
     renderGrid();
     resetSel();
     setStatus("");
+    if (docEmpty) setStatus("فایل خالی بود؛ یک برگه تازه باز شد", "ok");
     $("footInfo").textContent = WB.sheets.length + " برگه · " +
       Object.keys(curSheet().cells).length + " سلول پر";
   }).catch(function(err){
@@ -4745,13 +4758,99 @@ function buildPptx(zip){
     });
   });
 }
+/* A brand new deck: the smallest package buildPptx can edit. Used when the
+   file on the server is empty, so saving produces a real .pptx. */
+function basePptx(){
+  var zip = new JSZip();
+  var T = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+  zip.file("ppt/presentation.xml", T +
+    '<p:presentation xmlns:a="' + A_NS + '" xmlns:r="' + RR_NS + '" xmlns:p="' + P_NS + '">' +
+    '<p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst>' +
+    '<p:sldIdLst><p:sldId id="256" r:id="rId2"/></p:sldIdLst>' +
+    '<p:sldSz cx="12192000" cy="6858000"/><p:notesSz cx="6858000" cy="9144000"/>' +
+    "</p:presentation>");
+  zip.file("ppt/_rels/presentation.xml.rels", T +
+    '<Relationships xmlns="' + PKG_NS + '">' +
+    '<Relationship Id="rId1" Type="' + RR_NS + '/slideMaster" Target="slideMasters/slideMaster1.xml"/>' +
+    '<Relationship Id="rId2" Type="' + RR_NS + '/slide" Target="slides/slide1.xml"/>' +
+    '<Relationship Id="rId3" Type="' + RR_NS + '/theme" Target="theme/theme1.xml"/>' +
+    "</Relationships>");
+  zip.file("ppt/slides/slide1.xml", newSlideXml());
+  zip.file("ppt/slides/_rels/slide1.xml.rels", T +
+    '<Relationships xmlns="' + PKG_NS + '">' +
+    '<Relationship Id="rId1" Type="' + RR_NS + '/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>' +
+    "</Relationships>");
+  zip.file("ppt/slideLayouts/slideLayout1.xml", T +
+    '<p:sldLayout xmlns:a="' + A_NS + '" xmlns:r="' + RR_NS + '" xmlns:p="' + P_NS +
+    '" type="blank" preserve="1"><p:cSld name="Blank"><p:spTree>' +
+    '<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>' +
+    "</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>");
+  zip.file("ppt/slideLayouts/_rels/slideLayout1.xml.rels", T +
+    '<Relationships xmlns="' + PKG_NS + '">' +
+    '<Relationship Id="rId1" Type="' + RR_NS + '/slideMaster" Target="../slideMasters/slideMaster1.xml"/>' +
+    "</Relationships>");
+  zip.file("ppt/slideMasters/slideMaster1.xml", T +
+    '<p:sldMaster xmlns:a="' + A_NS + '" xmlns:r="' + RR_NS + '" xmlns:p="' + P_NS + '">' +
+    '<p:cSld><p:bg><p:bgPr><a:solidFill><a:srgbFill><a:srgbClr val="FFFFFF"/></a:srgbFill>' +
+    "<a:effectLst/></p:bgPr></p:bg><p:spTree>" +
+    '<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>' +
+    "</p:spTree></p:cSld>" +
+    '<p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2"' +
+    ' accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6"' +
+    ' hlink="hlink" folHlink="folHlink"/>' +
+    '<p:sldLayoutIdLst><p:sldLayoutId id="2147483649" r:id="rId1"/></p:sldLayoutIdLst>' +
+    "</p:sldMaster>");
+  zip.file("ppt/slideMasters/_rels/slideMaster1.xml.rels", T +
+    '<Relationships xmlns="' + PKG_NS + '">' +
+    '<Relationship Id="rId1" Type="' + RR_NS + '/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>' +
+    '<Relationship Id="rId2" Type="' + RR_NS + '/theme" Target="../theme/theme1.xml"/>' +
+    "</Relationships>");
+  zip.file("ppt/theme/theme1.xml", T + baseThemeXml());
+  zip.file("[Content_Types].xml", T +
+    '<Types xmlns="' + CT_NS + '">' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    '<Default Extension="xml" ContentType="application/xml"/>' +
+    '<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>' +
+    '<Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>' +
+    '<Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>' +
+    '<Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/>' +
+    '<Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>' +
+    "</Types>");
+  zip.file("_rels/.rels", T +
+    '<Relationships xmlns="' + PKG_NS + '">' +
+    '<Relationship Id="rId1" Type="' + RR_NS + '/officeDocument" Target="ppt/presentation.xml"/>' +
+    "</Relationships>");
+  return zip;
+}
+function baseThemeXml(){
+  var accent = ["4472C4", "ED7D31", "A5A5A5", "FFC000", "5B9BD5", "70AD47"];
+  var scheme = '<a:clrScheme name="Office"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1>' +
+    '<a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>' +
+    '<a:dk2><a:srgbClr val="44546A"/></a:dk2><a:lt2><a:srgbClr val="E7E6E6"/></a:lt2>';
+  accent.forEach(function(c){ scheme += '<a:accent' + (accent.indexOf(c) + 1) + '><a:srgbClr val="' + c + '"/></a:accent' + (accent.indexOf(c) + 1) + '>'; });
+  scheme += '<a:hlink><a:srgbClr val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink></a:clrScheme>';
+  var fill = "<a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill>";
+  return '<a:theme xmlns:a="' + A_NS + '" name="Office"><a:themeElements>' + scheme +
+    '<a:fontScheme name="Office"><a:majorFont><a:latin typeface="Calibri Light"/><a:ea typeface=""/>' +
+    '<a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/>' +
+    '<a:ea typeface=""/><a:cs typeface=""/></a:minorFont></a:fontScheme>' +
+    '<a:fmtScheme name="Office"><a:fillStyleLst>' + fill + fill + fill + "</a:fillStyleLst>" +
+    "<a:lnStyleLst>" +
+    '<a:ln w="6350">' + fill + "</a:ln><a:ln w=\"12700\">" + fill + "</a:ln>" +
+    '<a:ln w="19050">' + fill + "</a:ln></a:lnStyleLst>" +
+    "<a:effectStyleLst>" + "<a:effectStyle><a:effectLst/></a:effectStyle>".repeat(3) + "</a:effectStyleLst>" +
+    "<a:bgFillStyleLst>" + fill + fill + fill + "</a:bgFillStyleLst></a:fmtScheme>" +
+    "</a:themeElements></a:theme>";
+}
 function slideSave(){
   if (EXT !== "pptx") return Promise.resolve(false);
   syncSlideFromDom();
   setStatus("در حال ساخت فایل...");
-  return fetchBytes().then(function(buf){
-    return JSZip.loadAsync(buf);
-  }).then(function(zip){
+  var source = docEmpty
+    ? Promise.resolve(basePptx())
+    : fetchBytes().then(function(buf){ return JSZip.loadAsync(buf); })
+        .catch(function(){ return basePptx(); });
+  return source.then(function(zip){
     return buildPptx(zip);
   }).then(function(bytes){
     return saveToServer(bytes);
@@ -5023,11 +5122,18 @@ function slideBoot(){
     return fetchBytes();
   }).then(function(buf){
     setStatus("در حال باز کردن...");
+    if (docEmpty){
+      /* an empty file still opens: one blank slide, saved as a real deck */
+      SLIDES = [emptySlide()];
+      slideIdx = 0;
+      return Promise.resolve();
+    }
     return slideParse(buf);
   }).then(function(){
     renderThumbs();
     renderSlide();
     setStatus("");
+    if (docEmpty) setStatus("فایل خالی بود؛ یک اسلاید تازه باز شد", "ok");
     $("footInfo").textContent = SLIDES.length + " اسلاید";
   }).catch(function(err){
     showOpenError(err);
