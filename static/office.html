@@ -63,12 +63,20 @@ input,select{font-family:inherit}
   .ohead .hbtn.primary{min-width:0;max-width:44vw;overflow:hidden;text-overflow:ellipsis}
 }
 
-/* ---------- toolbar ---------- */
+/* ---------- toolbar ----------
+   The ribbon stays on one row and scrolls sideways: the spreadsheet tools are
+   the widest set, and wrapping left a lonely second row. */
 .otools{
-  flex:0 0 auto;display:flex;flex-wrap:wrap;align-items:center;gap:6px;
+  flex:0 0 auto;display:flex;flex-wrap:nowrap;align-items:center;gap:6px;
   padding:7px 10px;background:var(--panel2);border-bottom:1px solid var(--border);
+  overflow-x:auto;overflow-y:hidden;scrollbar-width:thin;
+  -webkit-overflow-scrolling:touch;
 }
-.tgrp{display:flex;align-items:center;gap:3px;padding:0 6px;border-right:1px solid var(--border)}
+.otools::-webkit-scrollbar{height:6px}
+.otools::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+.otools::-webkit-scrollbar-track{background:transparent}
+.tgrp{display:flex;align-items:center;gap:3px;padding:0 6px;border-right:1px solid var(--border);
+  flex:0 0 auto}
 .tgrp:last-child{border-right:none}
 .tb{
   min-width:30px;height:29px;padding:0 7px;border-radius:7px;border:1px solid transparent;
@@ -88,9 +96,12 @@ input,select{font-family:inherit}
 }
 .tsel:focus{border-color:var(--blue)}
 .tsel.narrow{max-width:74px}
-body.k-word .t-sheet, body.k-word .t-slide,
-body.k-sheet .t-word, body.k-sheet .t-slide,
-body.k-slide .t-word, body.k-slide .t-sheet{display:none}
+/* one document kind at a time: only the area that belongs to it is laid out,
+   the other two take no space at all (an author display rule would otherwise
+   beat the [hidden] attribute) */
+body.k-word #sheetArea, body.k-word #slideArea,
+body.k-sheet #wordArea, body.k-sheet #slideArea,
+body.k-slide #wordArea, body.k-slide #sheetArea{display:none !important}
 
 /* ---------- main ---------- */
 .omain{flex:1 1 auto;min-height:0;display:flex;position:relative}
@@ -308,7 +319,7 @@ table.grid{border-collapse:separate;border-spacing:0;table-layout:fixed;backgrou
     <div id="wordDoc" contenteditable="true" spellcheck="false"></div>
   </div>
 
-  <div id="sheetArea" hidden>
+  <div id="sheetArea">
     <div class="fbar">
       <span class="fxb" id="cellRef">A1</span>
       <input id="fxInput" autocomplete="off" spellcheck="false" placeholder="مقدار یا فرمول (=SUM(A1:A5))">
@@ -317,7 +328,7 @@ table.grid{border-collapse:separate;border-spacing:0;table-layout:fixed;backgrou
     <div class="stabs" id="stabs"></div>
   </div>
 
-  <div id="slideArea" hidden>
+  <div id="slideArea">
     <div class="sthumbs" id="sthumbs"></div>
     <div class="sstage" id="sstage"><div class="scanvas" id="scanvas"></div></div>
   </div>
@@ -434,6 +445,15 @@ function fetchBytes(){
       if (!r.ok) throw new Error("HTTP " + r.status);
       return r.arrayBuffer();
     });
+  }).then(function(buf){
+    /* an empty upload is not a broken download - say so instead of letting
+       the zip library complain about a truncated file */
+    if (!buf || !buf.byteLength){
+      var e = new Error("فایل خالی است (۰ بایت)");
+      e.empty = true;
+      throw e;
+    }
+    return buf;
   });
 }
 function downloadBytes(bytes, filename, mime){
@@ -491,9 +511,22 @@ function hideNotice(){ $("notice").hidden = true; }
 /* A document that failed to load is still offered for download, but the retry
    button sits above it so a second click is one step away. */
 function showOpenError(err){
+  var msg = String((err && err.message) || err);
+  if (err && err.empty){
+    showNotice("این فایل خالی است", "حجم فایل صفر بایت است، پس چیزی برای نمایش نیست.", false);
+    return;
+  }
+  /* a plain text file renamed to .docx/.xlsx/.pptx reaches the zip library
+     and comes back as "Corrupted zip" - name the real problem */
+  if (/corrupt|end of data|invalid signature|zip/i.test(msg)){
+    showNotice("این فایل یک سند آفیس نیست",
+      "محتوای فایل با پسوند ." + EXT + " هم‌خوانی ندارد. شاید فایل ناقص آپلود شده یا پسوندش اشتباه است.",
+      false);
+    return;
+  }
   showNotice("باز کردن فایل ممکن نشد",
-    "اگر این اولین بار است، یک‌بار «تلاش دوباره» را بزنید. (" +
-    String((err && err.message) || err) + ")", true);
+    "اگر این اولین بار است، یک‌بار «تلاش دوباره» را بزنید. اگر فایل خراب یا ناقص است، آن را دوباره آپلود کنید. (" +
+    msg + ")", true);
 }
 
 /* ---------- ribbon ----------
