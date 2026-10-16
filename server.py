@@ -1100,6 +1100,12 @@ INSTALL_EXTS: frozenset = frozenset({
     ".run", ".desktop",
 })
 
+# Read-only documents: they get the document viewer (page sidebar, zoom,
+# search, print) instead of being downloaded or opened in an editor.
+DOC_EXTS: frozenset = frozenset({
+    ".pdf", ".xps", ".oxps", ".epub", ".djvu", ".cbz", ".cbr", ".ps", ".eps",
+})
+
 
 def _row_icon(ext: str, href: str) -> str:
     """Icon for a file row: a picture when we can show one, else the badge.
@@ -1309,6 +1315,14 @@ def _load_page_template(name: str) -> str:
 
 INSTALL_HTML: str = _load_page_template("install.html")
 OFFICE_HTML: str = _load_page_template("office.html")
+VIEWER_HTML: str = _load_page_template("viewer.html")
+
+# Bundle the vendored editor libraries under a version query so a browser that
+# still has an older copy cached reloads them after an update.
+VENDOR_V: str = str(int(max(
+    (p.stat().st_mtime for p in (PROJECT_ROOT / "static" / "vendor").glob("*.js")),
+    default=time.time(),
+)))
 
 
 # Dedicated video player page. Kept as one template so the markup, the styles and
@@ -2449,6 +2463,16 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
     disable_nagle_algorithm = True
 
     # -- logging ----------------------------------------------------------
+    def handle_one_request(self) -> None:
+        """Clear per-response state before every request on the connection.
+
+        One handler instance serves any number of requests over a keep-alive
+        connection, so a ``_bytes_to_send`` left over from an earlier file
+        response would cut the body of the next page short.
+        """
+        self._bytes_to_send = None
+        super().handle_one_request()
+
     def _client_ip(self) -> str:
         """Real client IP, taken from the tunnel's forwarding header."""
         forwarded = self.headers.get("X-Forwarded-For")
@@ -3616,6 +3640,8 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
                     return self._render_video_viewer(virtual)
                 if ext in INSTALL_EXTS:
                     return self._render_install_page(virtual)
+                if ext in DOC_EXTS:
+                    return self._render_doc_viewer(virtual)
                 if ext in OFFICE_EXTS:
                     return self._render_office_page(virtual)
             elif query.get("proxy"):
@@ -3777,7 +3803,9 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
             # raw media bytes (used by <video>/<audio>/<img> src) — inline + Range
             if query.get("th") and path.suffix.lower() in IMG_EXTS:
                 return self._send_thumb(path)
-            return self._send_file(path, inline=True)
+            # The office editor pulls the document through fetch() and rewrites it
+            # in place, so it must never be answered from the browser cache.
+            return self._send_file(path, inline=True, cache=not query.get("proxy"))
         if query.get("zip"):
             return self._send_zip(path)
         if query.get("edit"):
@@ -3792,6 +3820,8 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
                 return self._render_video_viewer(path)
             if ext in INSTALL_EXTS:
                 return self._render_install_page(path)
+            if ext in DOC_EXTS:
+                return self._render_doc_viewer(path)
             if ext in OFFICE_EXTS:
                 return self._render_office_page(path)
             return self._send_file(path, inline=True)
@@ -3824,7 +3854,7 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
 
     @classmethod
     def _doc_page(cls, template: str, path: Path, size: int, kind: str = "") -> str:
-        """Fill a document-page template (office editor / installer page).
+        """Fill a document-page template (office editor / document viewer).
 
         Adds the keys the viewer template does not need: ``__DL__`` (a plain
         URL that downloads as an attachment), ``__KIND__`` (word/sheet/slide)
@@ -3835,6 +3865,7 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
             page
             .replace("__DL__", html.escape(urllib.parse.quote(path.name)))
             .replace("__KIND__", html.escape(kind))
+            .replace("__VENDOR_V__", VENDOR_V)
             .replace("__EXT__", html.escape(path.suffix.lower().lstrip(".")))
         )
 
@@ -3960,6 +3991,14 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
         return self._send_viewer_html(
             self._doc_page(OFFICE_HTML, path, st.st_size, kind)
         )
+
+    def _render_doc_viewer(self, path: Path):
+        """Document viewer for read-only files (PDF and friends)."""
+        st = self._entry_stat(path)
+        if st is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "File not found")
+            return None
+        return self._send_viewer_html(self._doc_page(VIEWER_HTML, path, st.st_size))
 
     def _send_zip_items(self, directory: Path, names: list):
         """Stream a ZIP of selected items inside *directory*."""
@@ -4383,7 +4422,7 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         return io.BytesIO(data)
 
-    def _send_file(self, path: Path, inline: bool = False):
+    def _send_file(self, path: Path, inline: bool = False, cache: bool = True):
         try:
             file_obj = open(path, "rb")
         except OSError:
@@ -4420,6 +4459,7 @@ class DownloadRequestHandler(SimpleHTTPRequestHandler):
             self.send_header("Content-Length", str(self._bytes_to_send))
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("Last-Modified", self.date_time_string(stat.st_mtime))
+            self.send_header("Cache-Control", "max-age=0, must-revalidate" if cache else "no-store")
             if inline:
                 self.send_header("Content-Disposition", "inline")
             else:
@@ -6903,6 +6943,8 @@ var OFFICE_EXT = {{}};
 {json.dumps([e.lstrip(".") for e in sorted(OFFICE_EXTS)])}.forEach(function(e) {{ OFFICE_EXT[e] = 1; }});
 var INSTALL_EXT = {{}};
 {json.dumps([e.lstrip(".") for e in sorted(INSTALL_EXTS)])}.forEach(function(e) {{ INSTALL_EXT[e] = 1; }});
+var DOC_EXT = {{}};
+{json.dumps([e.lstrip(".") for e in sorted(DOC_EXTS)])}.forEach(function(e) {{ DOC_EXT[e] = 1; }});
 /* same ext -> badge map the server used to paint the real rows, so a pending
    upload looks exactly like the file it will become */
 var FILE_BADGES = {json.dumps({k: list(v) for k, v in _FILE_BADGES.items()})};
@@ -7050,9 +7092,10 @@ function openFileRow(row) {{
   }} else if (VID_EXT[ext] || AUD_EXT[ext]) {{
     /* both get a dedicated player page; ?inline=1 decides which one */
     window.open(href + sep + "inline=1", "_blank");
-  }} else if (OFFICE_EXT[ext] || INSTALL_EXT[ext]) {{
+  }} else if (OFFICE_EXT[ext] || INSTALL_EXT[ext] || DOC_EXT[ext]) {{
     /* office documents open in their editor page, installers on the
-       centered download page — both routed by extension server-side */
+       centered download page, PDFs in the document viewer — all routed
+       by extension server-side */
     window.open(href + sep + "inline=1", "_blank");
   }} else {{
     window.open(href + sep + "edit=1", "_blank");

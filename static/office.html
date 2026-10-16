@@ -55,6 +55,13 @@ input,select{font-family:inherit}
 .hstat.ok{color:var(--green)}
 .hstat.err{color:var(--red)}
 .spacer{flex:1}
+/* a long button label (e.g. the download-as-docx one) must not widen the
+   header past the viewport on a phone */
+@media (max-width:520px){
+  .ohead{gap:7px;padding:8px}
+  .ohead .hsize{display:none}
+  .ohead .hbtn.primary{min-width:0;max-width:44vw;overflow:hidden;text-overflow:ellipsis}
+}
 
 /* ---------- toolbar ---------- */
 .otools{
@@ -206,6 +213,10 @@ table.grid{border-collapse:separate;border-spacing:0;table-layout:fixed;backgrou
 .sblk:focus{outline:2px solid rgba(59,130,246,.8);background:rgba(59,130,246,.07)}
 .sblk p{margin:0 0 2px}
 .simg{position:absolute;object-fit:contain;pointer-events:none}
+.sshp{position:absolute;border-radius:2px;cursor:move;min-height:6px}
+.sshp-ellipse{border-radius:50%}
+.sshp-line{cursor:move;background:none!important;border-top-style:solid;border-top-width:3px}
+#scanvas .sshp.sel{outline:2px dashed rgba(59,130,246,.9);outline-offset:2px}
 @media (max-width:760px){
   #slideArea{flex-direction:column}
   .sthumbs{width:auto;flex-direction:row;border-right:none;border-bottom:1px solid var(--border);order:2;overflow-x:auto;overflow-y:hidden}
@@ -233,6 +244,35 @@ table.grid{border-collapse:separate;border-spacing:0;table-layout:fixed;backgrou
 .ncard p{margin-top:10px;font-size:13px;color:var(--text3);line-height:1.9}
 .nbtns{display:flex;gap:10px;margin-top:20px}
 .nbtns .hbtn{flex:1;justify-content:center;padding:11px 12px;font-size:13.5px}
+/* find & replace bar (word) */
+.findbar{
+  position:absolute;z-index:40;top:12px;left:50%;transform:translateX(-50%);
+  display:flex;align-items:center;gap:6px;padding:8px 10px;border-radius:12px;
+  background:var(--panel);border:1px solid var(--border2);box-shadow:0 12px 32px rgba(0,0,0,.45);
+  max-width:calc(100% - 24px);flex-wrap:wrap;
+}
+.findbar[hidden]{display:none}
+.findbar input{
+  background:var(--panel2);border:1px solid var(--border2);border-radius:8px;color:var(--text);
+  padding:6px 9px;font-size:12.5px;min-width:130px;outline:none;
+}
+.findbar input:focus{border-color:var(--blue)}
+.findbar button{
+  padding:6px 10px;border-radius:8px;border:1px solid var(--border2);background:var(--panel2);
+  color:var(--text2);font-size:12px;font-weight:700;
+}
+.findbar button:hover{border-color:var(--blue);color:var(--text)}
+#findOut{font-size:12px;color:var(--text3)}
+/* print: only the document itself, no chrome */
+@media print{
+  .ohead,.otools,.ofoot,.notice,.findbar,.sthumbs,.fbar,.stabs,.pnav,.pcount{display:none !important}
+  html,body{height:auto;background:#fff}
+  body{overflow:visible}
+  .omain{overflow:visible;display:block;padding:0}
+  #wordDoc{border:none;box-shadow:none;min-height:0;padding:0;max-width:none}
+  #gridWrap{overflow:visible;height:auto}
+  table.grid td{page-break-inside:avoid}
+}
 /* present mode */
 .present{position:fixed;inset:0;z-index:80;background:#000;display:flex;align-items:center;justify-content:center}
 .present[hidden]{display:none}
@@ -259,94 +299,9 @@ table.grid{border-collapse:separate;border-spacing:0;table-layout:fixed;backgrou
   <button class="hbtn primary" type="button" id="saveBtn">ذخیره</button>
 </header>
 
-<div class="otools">
-  <div class="tgrp">
-    <button class="tb" type="button" data-cmd="undo" title="بازگردانی (Ctrl+Z)">&#8630;</button>
-    <button class="tb" type="button" data-cmd="redo" title="انجام مجدد (Ctrl+Y)">&#8631;</button>
-  </div>
-
-  <div class="tgrp t-word t-sheet t-slide">
-    <select class="tsel" id="ffSel" title="فونت"></select>
-    <select class="tsel narrow" id="fsSel" title="اندازه فونت"></select>
-  </div>
-
-  <div class="tgrp t-word t-sheet t-slide">
-    <button class="tb" type="button" data-cmd="bold" title="بولد (Ctrl+B)"><b>B</b></button>
-    <button class="tb" type="button" data-cmd="italic" title="ایتالیک (Ctrl+I)"><i>I</i></button>
-    <button class="tb" type="button" data-cmd="underline" title="زیرخط (Ctrl+U)"><u>U</u></button>
-    <button class="tb" type="button" data-cmd="strike" title="خط‌خورده"><s>S</s></button>
-  </div>
-
-  <div class="tgrp t-word t-sheet t-slide">
-    <label class="tb color" title="رنگ متن"><input type="color" id="fgCol" value="#e11d48"><span>A</span></label>
-    <label class="tb color" id="bgWrap" title="رنگ پس‌زمینه"><input type="color" id="bgCol" value="#fde047"><span>&#9632;</span></label>
-  </div>
-
-  <div class="tgrp t-word t-sheet t-slide">
-    <button class="tb" type="button" data-align="left" title="چپ‌چین">&#8676;</button>
-    <button class="tb" type="button" data-align="center" title="وسط‌چین">&#8596;</button>
-    <button class="tb" type="button" data-align="right" title="راست‌چین">&#8677;</button>
-    <button class="tb t-word" type="button" data-align="justify" title="هم‌عرض">&#9776;</button>
-  </div>
-
-  <!-- word only -->
-  <div class="tgrp t-word">
-    <select class="tsel narrow" id="blkSel" title="نوع بند">
-      <option value="p">متن</option>
-      <option value="h1">عنوان ۱</option>
-      <option value="h2">عنوان ۲</option>
-      <option value="h3">عنوان ۳</option>
-      <option value="blockquote">نقل‌قول</option>
-      <option value="pre">کد</option>
-    </select>
-  </div>
-  <div class="tgrp t-word">
-    <button class="tb" type="button" data-cmd="insertUnorderedList" title="لیست تیره">&#8226; —</button>
-    <button class="tb" type="button" data-cmd="insertOrderedList" title="لیست شماره‌دار">۱. —</button>
-    <button class="tb" type="button" data-cmd="outdent" title="بازکردن تورفتگی">&#8676;|</button>
-    <button class="tb" type="button" data-cmd="indent" title="تورفتگی">|&#8677;</button>
-  </div>
-  <div class="tgrp t-word">
-    <button class="tb" type="button" id="wLink" title="پیوند">&#128279;</button>
-    <button class="tb" type="button" id="wImg" title="درج تصویر">&#128444;</button>
-    <button class="tb" type="button" id="wTable" title="جدول">&#9638;</button>
-    <button class="tb" type="button" id="wHr" title="خط جداکننده">&#8212;</button>
-    <button class="tb" type="button" data-cmd="removeFormat" title="حذف قالب">&#10697;</button>
-  </div>
-
-  <!-- sheet only -->
-  <div class="tgrp t-sheet">
-    <select class="tsel" id="fmtSel" title="قالب عدد">
-      <option value="">عمومی</option>
-      <option value="0">0</option>
-      <option value="0.00">0.00</option>
-      <option value="#,##0">#,##0</option>
-      <option value="#,##0.00">#,##0.00</option>
-      <option value="0%">0%</option>
-      <option value="0.00%">0.00%</option>
-      <option value="$#,##0.00">$#,##0.00</option>
-      <option value="yyyy-mm-dd">تاریخ</option>
-      <option value="hh:mm">ساعت</option>
-      <option value="@">متن</option>
-    </select>
-    <button class="tb" type="button" id="shAddRow" title="افزودن ردیف">+ردیف</button>
-    <button class="tb" type="button" id="shDelRow" title="حذف ردیف">−ردیف</button>
-    <button class="tb" type="button" id="shAddCol" title="افزودن ستون">+ستون</button>
-    <button class="tb" type="button" id="shDelCol" title="حذف ستون">−ستون</button>
-  </div>
-
-  <!-- slide only -->
-  <div class="tgrp t-slide">
-    <button class="tb" type="button" id="sAdd" title="اسلاید جدید">+اسلاید</button>
-    <button class="tb" type="button" id="sDup" title="تکرار اسلاید">&#10697;</button>
-    <button class="tb" type="button" id="sDel" title="حذف اسلاید">&#128465;</button>
-    <button class="tb" type="button" id="sPrev" title="قبلی">&#8249;</button>
-    <button class="tb" type="button" id="sNext" title="بعدی">&#8250;</button>
-    <label class="tb color" title="رنگ پس‌زمینه اسلاید"><input type="color" id="sBg" value="#ffffff"><span>&#9632;</span></label>
-    <button class="tb" type="button" id="sText" title="جعبه متن">&#+متن</button>
-    <button class="tb" type="button" id="sPresent" title="نمایش">&#9654;</button>
-  </div>
-</div>
+<!-- The ribbon is built per document kind (see buildRibbon): a Word file
+     never shows the spreadsheet tools, and so on. -->
+<div class="otools" id="ribbon"></div>
 
 <main class="omain">
   <div id="wordArea">
@@ -373,10 +328,21 @@ table.grid{border-collapse:separate;border-spacing:0;table-layout:fixed;backgrou
       <h2 id="noticeTitle">این فرمت در مرورگر ویرایش نمی‌شود</h2>
       <p id="noticeText"></p>
       <div class="nbtns">
+        <button class="hbtn primary" type="button" id="noticeRetry" hidden>تلاش دوباره</button>
         <a class="hbtn primary" id="noticeDl" href="__DL__">&#8681; دانلود فایل</a>
         <button class="hbtn" type="button" id="noticeBack">بازگشت</button>
       </div>
     </div>
+  </div>
+
+  <div class="findbar" id="findBox" hidden>
+    <input id="findInput" placeholder="یافتن" autocomplete="off" spellcheck="false">
+    <input id="replInput" placeholder="جایگزینی با" autocomplete="off" spellcheck="false">
+    <button type="button" id="findNext">بعدی</button>
+    <button type="button" id="findPrev">قبلی</button>
+    <button type="button" id="findAll">همه را جایگزین کن</button>
+    <button type="button" id="findClose">بستن</button>
+    <span id="findOut"></span>
   </div>
 </main>
 
@@ -411,6 +377,7 @@ var KIND = "__KIND__";
 var EXT  = "__EXT__".toLowerCase();
 var NAME = __JSON_NAME__;
 var SRC  = "__SRC__";
+var VENDOR_V = "__VENDOR_V__";
 var $  = function(id){ return document.getElementById(id); };
 var BYTE_URL = SRC + (SRC.indexOf("?") >= 0 ? "&" : "?") + "proxy=1";
 
@@ -436,19 +403,37 @@ function fromB64(s){
   for (var i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
   return u.buffer;
 }
+/* A script and a document both come over the same tunnel as the page, and a
+   single dropped connection used to leave the editor stuck on an error screen
+   for good. Both helpers retry a couple of times and remember what they got,
+   so a hiccup costs a moment instead of the whole document. */
+var scriptCache = {};
 function loadScript(src){
-  return new Promise(function(res, rej){
+  if (scriptCache[src]) return scriptCache[src];
+  scriptCache[src] = new Promise(function(res, rej){
     var s = document.createElement("script");
-    s.src = src;
-    s.onload = res;
-    s.onerror = function(){ rej(new Error("barگذاری ناموفق: " + src)); };
+    s.src = src + (src.indexOf("?") >= 0 ? "&" : "?") + "v=" + VENDOR_V;
+    s.onload = function(){ res(); };
+    s.onerror = function(){ rej(new Error("بارگذاری ناموفق: " + src)); };
     document.head.appendChild(s);
+  });
+  return scriptCache[src];
+}
+function retry(task, tries){
+  tries = tries || 3;
+  return task().catch(function(err){
+    if (tries <= 1) throw err;
+    return new Promise(function(res){ setTimeout(res, 500); }).then(function(){
+      return retry(task, tries - 1);
+    });
   });
 }
 function fetchBytes(){
-  return fetch(BYTE_URL, {credentials:"same-origin"}).then(function(r){
-    if (!r.ok) throw new Error("HTTP " + r.status);
-    return r.arrayBuffer();
+  return retry(function(){
+    return fetch(BYTE_URL, {credentials: "same-origin", cache: "no-store"}).then(function(r){
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.arrayBuffer();
+    });
   });
 }
 function downloadBytes(bytes, filename, mime){
@@ -496,19 +481,218 @@ function closeViewerTab(){
     catch(e2){ location.href = location.pathname.replace(/[^/]*$/,"") || "/"; }
   }, 80);
 }
-function showNotice(title, text){
+function showNotice(title, text, canRetry){
   $("noticeTitle").textContent = title;
   $("noticeText").textContent = text;
+  $("noticeRetry").hidden = !canRetry;
   $("notice").hidden = false;
 }
 function hideNotice(){ $("notice").hidden = true; }
+/* A document that failed to load is still offered for download, but the retry
+   button sits above it so a second click is one step away. */
+function showOpenError(err){
+  showNotice("باز کردن فایل ممکن نشد",
+    "اگر این اولین بار است، یک‌بار «تلاش دوباره» را بزنید. (" +
+    String((err && err.message) || err) + ")", true);
+}
+
+/* ---------- ribbon ----------
+   Each document kind gets its own toolbar: a Word file shows only the text
+   tools, a spreadsheet only the grid tools, a presentation only the slide
+   tools. Nothing of the other two apps is rendered, so there is nothing to
+   hide and nothing that can be clicked by mistake. */
+function tb(cmd, title, glyph, cls){
+  return '<button class="tb' + (cls ? " " + cls : "") + '" type="button"' +
+    (cmd ? ' data-cmd="' + cmd + '"' : "") + ' title="' + title + '">' + glyph + "</button>";
+}
+function tbId(id, title, glyph, cls){
+  return '<button class="tb' + (cls ? " " + cls : "") + '" type="button" id="' + id +
+    '" title="' + title + '">' + glyph + "</button>";
+}
+function tbAl(align, title, glyph){
+  return '<button class="tb" type="button" data-align="' + align + '" title="' + title + '">' +
+    glyph + "</button>";
+}
+function colorId(id, title, value, glyph){
+  return '<label class="tb color" title="' + title + '"><input type="color" id="' + id +
+    '" value="' + value + '"><span>' + glyph + "</span></label>";
+}
+function fontGroup(){
+  return '<div class="tgrp">' +
+    '<select class="tsel" id="ffSel" title="فونت"></select>' +
+    '<select class="tsel narrow" id="fsSel" title="اندازه فونت"></select>' +
+  "</div>";
+}
+function colorGroup(){
+  return '<div class="tgrp">' +
+    colorId("fgCol", "رنگ متن", "#e11d48", "A") +
+    colorId("bgCol", "رنگ پس‌زمینه", "#fde047", "&#9632;") +
+  "</div>";
+}
+function historyGroup(){
+  return '<div class="tgrp">' + tb("undo", "بازگردانی (Ctrl+Z)", "&#8630;") +
+    tb("redo", "انجام مجدد (Ctrl+Y)", "&#8631;") + "</div>";
+}
+var RIBBONS = {
+  word:
+    historyGroup() +
+    fontGroup() +
+    '<div class="tgrp">' +
+      tb("bold", "بولد (Ctrl+B)", "<b>B</b>") +
+      tb("italic", "ایتالیک (Ctrl+I)", "<i>I</i>") +
+      tb("underline", "زیرخط (Ctrl+U)", "<u>U</u>") +
+      tb("strike", "خط‌خورده", "<s>S</s>") +
+      tb("superscript", "بالانویس", "X<sup>2</sup>") +
+      tb("subscript", "زیرنویس", "X<sub>2</sub>") +
+    "</div>" +
+    colorGroup() +
+    '<div class="tgrp">' +
+      tbAl("left", "چپ‌چین", "&#8676;") +
+      tbAl("center", "وسط‌چین", "&#8596;") +
+      tbAl("right", "راست‌چین", "&#8677;") +
+      tbAl("justify", "هم‌عرض", "&#9776;") +
+    "</div>" +
+    '<div class="tgrp">' +
+      '<select class="tsel narrow" id="blkSel" title="نوع بند">' +
+        '<option value="p">متن</option>' +
+        '<option value="h1">عنوان ۱</option>' +
+        '<option value="h2">عنوان ۲</option>' +
+        '<option value="h3">عنوان ۳</option>' +
+        '<option value="blockquote">نقل‌قول</option>' +
+        '<option value="pre">کد</option>' +
+      "</select>" +
+    "</div>" +
+    '<div class="tgrp">' +
+      tb("insertUnorderedList", "لیست تیره", "&#8226;") +
+      tb("insertOrderedList", "لیست شماره‌دار", "۱.") +
+      tb("outdent", "بازکردن تورفتگی", "&#8676;|") +
+      tb("indent", "تورفتگی", "|&#8677;") +
+    "</div>" +
+    '<div class="tgrp">' +
+      tbId("wLink", "درج پیوند", "&#128279;") +
+      tbId("wImg", "درج تصویر", "&#128444;") +
+      tbId("wTable", "درج جدول", "&#9638;") +
+      tbId("wHr", "خط جداکننده", "&#8212;") +
+      tb("removeFormat", "حذف قالب", "&#10697;") +
+    "</div>" +
+    '<div class="tgrp">' +
+      tbId("wFind", "یافتن و جایگزینی (Ctrl+F)", "&#128269;") +
+      tbId("wPrint", "چاپ", "&#128424;") +
+    "</div>",
+  sheet:
+    historyGroup() +
+    fontGroup() +
+    '<div class="tgrp">' +
+      tb("bold", "بولد (Ctrl+B)", "<b>B</b>") +
+      tb("italic", "ایتالیک (Ctrl+I)", "<i>I</i>") +
+      tb("underline", "زیرخط (Ctrl+U)", "<u>U</u>") +
+      tb("strike", "خط‌خورده", "<s>S</s>") +
+    "</div>" +
+    colorGroup() +
+    '<div class="tgrp">' +
+      tbAl("left", "چپ‌چین", "&#8676;") +
+      tbAl("center", "وسط‌چین", "&#8596;") +
+      tbAl("right", "راست‌چین", "&#8677;") +
+      tbId("shWrap", "شکستن متن در سلول", "&#8618;") +
+      tbId("shMerge", "ادغام سلول‌ها", "&#9646;&#9645;") +
+    "</div>" +
+    '<div class="tgrp">' +
+      '<select class="tsel" id="fmtSel" title="قالب عدد">' +
+        '<option value="">عمومی</option>' +
+        '<option value="0">0</option>' +
+        '<option value="0.00">0.00</option>' +
+        '<option value="#,##0">#,##0</option>' +
+        '<option value="#,##0.00">#,##0.00</option>' +
+        '<option value="0%">0%</option>' +
+        '<option value="0.00%">0.00%</option>' +
+        '<option value="$#,##0.00">$#,##0.00</option>' +
+        '<option value="yyyy-mm-dd">تاریخ</option>' +
+        '<option value="hh:mm">ساعت</option>' +
+        '<option value="@">متن</option>' +
+      "</select>" +
+      tbId("shDecPlus", "افزایش اعشار", ".0&#8593;") +
+      tbId("shDecMinus", "کاهش اعشار", ".0&#8595;") +
+    "</div>" +
+    '<div class="tgrp">' +
+      tbId("shAddRow", "درج ردیف", "+&#9618;") +
+      tbId("shDelRow", "حذف ردیف", "&#8722;&#9618;") +
+      tbId("shAddCol", "درج ستون", "+&#9646;") +
+      tbId("shDelCol", "حذف ستون", "&#8722;&#9646;") +
+      tbId("shClear", "پاک کردن محتوا", "&#9003;") +
+    "</div>" +
+    '<div class="tgrp">' +
+      tbId("shSum", "مجموع (AutoSum)", "&#8721;") +
+      tbId("shAvg", "میانگین", "&#8721;&#772;") +
+      tbId("shCount", "تعداد", "#") +
+      tbId("shFillDown", "پر کردن تا پایین", "&#8615;") +
+      tbId("shFillRight", "پر کردن تا راست", "&#8614;") +
+    "</div>" +
+    '<div class="tgrp">' +
+      tbId("shSortAsc", "مرتب‌سازی صعودی", "A&#8593;Z") +
+      tbId("shSortDesc", "مرتب‌سازی نزولی", "Z&#8593;A") +
+    "</div>" +
+    '<div class="tgrp">' +
+      tbId("shNewSheet", "برگه جدید", "&#43;") +
+      tbId("shRenameSheet", "تغییر نام برگه", "&#9998;") +
+      tbId("shDelSheet", "حذف برگه", "&#128465;") +
+      tbId("shPrint", "چاپ", "&#128424;") +
+    "</div>",
+  slide:
+    '<div class="tgrp">' +
+      tbId("sAdd", "اسلاید جدید", "&#43;") +
+      tbId("sDup", "تکرار اسلاید", "&#10697;") +
+      tbId("sDel", "حذف اسلاید", "&#128465;") +
+    "</div>" +
+    '<div class="tgrp">' +
+      tbId("sFirst", "اولین اسلاید", "&#124;&#9664;") +
+      tbId("sPrev", "اسلاید قبلی", "&#8249;") +
+      tbId("sNext", "اسلاید بعدی", "&#8250;") +
+      tbId("sLast", "آخرین اسلاید", "&#9654;&#124;") +
+    "</div>" +
+    '<div class="tgrp">' +
+      tbId("sText", "جعبه متن", "&#43;متن") +
+      tbId("sImg", "درج تصویر", "&#128444;") +
+      tbId("sRect", "مستطیل", "&#9633;") +
+      tbId("sEllipse", "بیضی", "&#9711;") +
+      tbId("sLine", "خط", "&#8725;") +
+    "</div>" +
+    fontGroup() +
+    colorGroup() +
+    '<div class="tgrp">' +
+      tb("bold", "بولد", "<b>B</b>") +
+      tb("italic", "ایتالیک", "<i>I</i>") +
+      tb("underline", "زیرخط", "<u>U</u>") +
+    "</div>" +
+    '<div class="tgrp">' +
+      tbAl("left", "چپ‌چین", "&#8676;") +
+      tbAl("center", "وسط‌چین", "&#8596;") +
+      tbAl("right", "راست‌چین", "&#8677;") +
+    "</div>" +
+    '<div class="tgrp">' +
+      colorId("sFill", "رنگ شکل", "#3b82f6", "&#9632;") +
+      tbId("sForward", "یک لایه جلو", "&#9650;") +
+      tbId("sBackward", "یک لایه عقب", "&#9660;") +
+      tbId("sDelBlk", "حذف عنصر انتخاب‌شده", "&#128465;") +
+    "</div>" +
+    '<div class="tgrp">' +
+      colorId("sBg", "رنگ پس‌زمینه اسلاید", "#ffffff", "&#9633;") +
+      tbId("sPresent", "نمایش (F5)", "&#9654;") +
+      tbId("sPrint", "چاپ اسلایدها", "&#128424;") +
+    "</div>"
+};
+function buildRibbon(){
+  var el = $("ribbon");
+  el.innerHTML = RIBBONS[KIND] || RIBBONS.word;
+}
 
 /* ---------- fonts / sizes ---------- */
 var FONTS = ["Calibri","Arial","Times New Roman","Courier New","Tahoma","Verdana",
              "Georgia","Impact","Comic Sans MS","Segoe UI","Noto Sans Arabic","Roboto"];
 var SIZES = [8,9,10,11,12,14,16,18,20,24,28,32,40,48,56,64,72];
-(function initFontSelects(){
+/* the selects live in the ribbon, so they are filled once it is built */
+function initFontSelects(){
   var ff = $("ffSel"), fs = $("fsSel");
+  if (!ff || !fs) return;
   FONTS.forEach(function(f){
     var o = document.createElement("option"); o.value = f; o.textContent = f; ff.appendChild(o);
   });
@@ -517,7 +701,7 @@ var SIZES = [8,9,10,11,12,14,16,18,20,24,28,32,40,48,56,64,72];
     var o = document.createElement("option"); o.value = String(s); o.textContent = String(s); fs.appendChild(o);
   });
   fs.value = "12";
-})();
+}
 
 /* ---------- html -> run model (shared by the docx & pptx writers) ----------
    A run is {t:text} plus optional {b,i,u,strike,color,font,sz,hl,sub,sup,href}.
@@ -556,6 +740,10 @@ function applyCssToStyle(style, st){
     var fam = String(style.fontFamily).split(",")[0].replace(/^\s*["']|["']\s*$/g, "");
     if (fam) st.font = fam;
   }
+  /* execCommand writes vertical-align, some editors use <sup>/<sub> */
+  var va = String(style.verticalAlign || "");
+  if (va === "super") st.sup = true;
+  else if (va === "sub") st.sub = true;
 }
 function collectRuns(node, st, runs){
   if (node.nodeType === 3){
@@ -700,11 +888,25 @@ function wordSupported(ext){
 
 function rtfToHtml(src){
   var colors = [""], fonts = [""], html = [];
-  var depth = 0, skipAt = -1, silentAt = -1;
+  var depth = 0, skipAt = -1;
   var stStack = [];
   var st = {b:false, i:false, u:false, strike:false, fs:22, color:0, font:0};
-  var uc = 1, pAlign = "left", para = [], cur = null;
+  var uc = 1, pAlign = "left", para = [], cur = null, paraList = "";
   var i = 0, n = src.length;
+  /* index of the "}" that closes the group opened just before ``from`` -
+     the font and colour tables nest one group per entry, so a plain
+     indexOf("}") would leave the rest of the table in the body text. */
+  function groupEnd(from){
+    var d2 = 1, j = from;
+    while (j < n){
+      var ch = src.charAt(j);
+      if (ch === "\\"){ j += 2; continue; }
+      if (ch === "{") d2++;
+      else if (ch === "}"){ d2--; if (!d2) return j; }
+      j++;
+    }
+    return n;
+  }
   function newRun(){
     cur = {b:st.b, i:st.i, u:st.u, strike:st.strike,
            sz: Math.max(5, Math.round(st.fs / 2)),
@@ -716,8 +918,12 @@ function rtfToHtml(src){
     if (!cur) newRun();
     cur.t += s;
   }
+  function paraHasText(){
+    for (var k = 0; k < para.length; k++) if (para[k].t) return true;
+    return false;
+  }
   function flushPara(){
-    if (skipAt >= 0) { para = []; cur = null; return; }
+    if (skipAt >= 0) { para = []; cur = null; paraList = ""; return; }
     var body = "";
     for (var k = 0; k < para.length; k++){
       var r = para[k];
@@ -730,10 +936,14 @@ function rtfToHtml(src){
       if (r.color) style += "color:#" + r.color + ";";
       if (r.font) style += "font-family:" + r.font.replace(/["']/g, "") + ";";
       if (r.sz && r.sz !== 11) style += "font-size:" + (r.sz * 1.333).toFixed(1) + "px;";
-      body += style ? '<span style="' + style + '">' + esc(r.t) + "</span>" : esc(r.t);
+      /* "\line" is a soft break inside the paragraph, not paragraph text */
+      body += style ? '<span style="' + style + '">' + esc(r.t).replace(/\n/g, "<br>") + "</span>"
+                    : esc(r.t).replace(/\n/g, "<br>");
     }
-    html.push('<p style="text-align:' + pAlign + ';margin:0 0 6px">' + (body || "<br>") + "</p>");
-    para = []; cur = null;
+    var p = '<p style="text-align:' + pAlign + ';margin:0 0 6px">' + (body || "<br>") + "</p>";
+    if (paraList === "ul") p = "<ul><li>" + p + "</li></ul>";
+    html.push(p);
+    para = []; cur = null; paraList = "";
   }
   function readWord(){
     var m = /^\\([a-zA-Z]+)(-?\d+)?[ ]?/.exec(src.slice(i));
@@ -755,34 +965,32 @@ function rtfToHtml(src){
       if (src.substr(i, 2) === "\\*"){ skipAt = depth; i += 2; continue; }
       var peek = /^\\([a-zA-Z]+)/.exec(src.slice(i));
       if (peek && IGNORABLE[peek[1]]){
-        if (peek[1] === "colortbl" || peek[1] === "fonttbl"){
-          silentAt = depth; skipAt = depth; i += peek[0].length;
-          /* parse the table in silent mode below */
-          var bodyStart = i, end = src.indexOf("}", i);
-          var bodyTxt = src.slice(bodyStart, end);
-          if (peek[1] === "colortbl"){
-            var parts = bodyTxt.split(";");
-            for (var ci = 1; ci < parts.length; ci++){
-              var rc = /\\red(\d+)/.exec(parts[ci]);
-              var gc = /\\green(\d+)/.exec(parts[ci]);
-              var bc = /\\blue(\d+)/.exec(parts[ci]);
-              if (rc && gc && bc){
-                var hx = function(v){ return ("0" + parseInt(v, 10).toString(16)).slice(-2); };
-                colorList.push((hx(rc[1]) + hx(gc[1]) + hx(bc[1])).toUpperCase());
-              } else colorList.push("");
-            }
-            colors = [""].concat(colorList);
-          } else {
-            var fm = /\\f(\d+)[^;]*?([A-Za-z][A-Za-z0-9 \-]{1,40});/g, mm;
-            var tmp = bodyTxt;
-            while ((mm = fm.exec(tmp))) fonts[parseInt(mm[1], 10)] = mm[2].trim();
+        var dest = peek[1];
+        i += peek[0].length;
+        var end = groupEnd(i);
+        var bodyTxt = src.slice(i, end);
+        if (dest === "colortbl"){
+          var parts = bodyTxt.split(";");
+          for (var ci = 1; ci < parts.length; ci++){
+            var rc = /\\red(\d+)/.exec(parts[ci]);
+            var gc = /\\green(\d+)/.exec(parts[ci]);
+            var bc = /\\blue(\d+)/.exec(parts[ci]);
+            if (rc && gc && bc){
+              var hx = function(v){ return ("0" + parseInt(v, 10).toString(16)).slice(-2); };
+              colorList.push((hx(rc[1]) + hx(gc[1]) + hx(bc[1])).toUpperCase());
+            } else colorList.push("");
           }
-          i = end; /* the closing brace is consumed by the loop */
-          skipAt = -1; silentAt = -1;
-          if (src.charAt(i) === "}") { depth--; i++; var top = stStack.pop(); if (top) st = top; }
-          continue;
+          colors = [""].concat(colorList);
+        } else if (dest === "fonttbl"){
+          /* \fcharset is part of the entry, not part of the font name */
+          var fm = /\\f(\d+)(?:\\fcharset\d+)?[ ]?([A-Za-z][A-Za-z0-9 \-]{1,40});/g, mm;
+          while ((mm = fm.exec(bodyTxt))) fonts[parseInt(mm[1], 10)] = mm[2].trim();
         }
-        skipAt = depth;
+        skipAt = -1;
+        i = end + 1;                 /* step over the closing brace */
+        depth--;
+        var top = stStack.pop();
+        if (top) st = top;
         continue;
       }
       continue;
@@ -793,7 +1001,8 @@ function rtfToHtml(src){
       i++;
       var saved = stStack.pop();
       if (saved) st = saved;
-      if (depth <= 0) flushPara();
+      /* the last "}" only closes the document - it must not add a paragraph */
+      if (depth <= 0 && i < n) flushPara();
       continue;
     }
     if (c === "\\"){
@@ -801,7 +1010,7 @@ function rtfToHtml(src){
       if (!word){
         var ch2 = src.charAt(i);
         i++;
-        if (skipAt < 0 && silentAt < 0){
+        if (skipAt < 0){
           if (ch2 === "{" || ch2 === "}" || ch2 === "\\") emit(ch2);
           else if (ch2 === "~") emit("\u00a0");
           else if (ch2 === "_") emit("-");
@@ -811,19 +1020,23 @@ function rtfToHtml(src){
             emit("\\u" + parseInt(src.substr(i, 2), 16) + "?");
             i += 2;
           }
-        } else if (ch2 === "'" && skipAt < 0){ i += 2; }
+        } else if (ch2 === "'"){ i += 2; }
         continue;
       }
       var w = word.w, num = word.num;
-      if (skipAt >= 0 || silentAt >= 0){
-        /* only destination switches matter while skipping */
-        if (w === "u" && skipAt < 0){ i += uc; }
+      if (skipAt >= 0){
+        /* only the unicode switch matters while skipping a destination */
+        if (w === "u" && num != null) i += uc;
         continue;
       }
       switch (w){
-        case "par": case "sect": case "page": case "pard": flushPara(); if (w === "pard") pAlign = "left"; break;
-        case "line": emit("<br>"); break;
-        case "tab": emit("\t"); break;
+        /* \pard only resets the paragraph properties, it starts no paragraph */
+        case "pard": pAlign = "left"; break;
+        case "par": case "sect": case "page": flushPara(); break;
+        case "line": emit("\n"); break;
+        case "tab": if (!paraHasText()) paraList = "ul"; else emit("\t"); break;
+        case "bullet": if (!paraHasText()) paraList = "ul"; break;
+        case "pntext": paraList = "ul"; break;
         case "b": st.b = num === 0 ? false : true; break;
         case "i": st.i = num === 0 ? false : true; break;
         case "u": st.u = num === 0 ? false : true; break;
@@ -836,20 +1049,20 @@ function rtfToHtml(src){
         case "qc": pAlign = "center"; break;
         case "qr": pAlign = "right"; break;
         case "qj": pAlign = "justify"; break;
-        case "u": break;
         default: break;
       }
-      if (w === "u" && num != null && skipAt < 0){
+      if (w === "u" && num != null){
         emit(String.fromCharCode(num));
         i += uc; /* skip the fallback characters */
       }
       continue;
     }
     /* plain text */
-    if (skipAt < 0) emit(c);
+    if (skipAt < 0 && c !== "\r" && c !== "\n") emit(c);
     i++;
   }
-  flushPara();
+  /* the trailing \par already closed the last paragraph - do not add one more */
+  if (paraHasText() || paraList) flushPara();
   return html.join("") || "<p><br></p>";
 }
 
@@ -1370,13 +1583,114 @@ function wireWordToolbar(){
   });
   $("ffSel").addEventListener("change", function(){ restoreSel(); exec("fontName", this.value); });
   $("fsSel").addEventListener("change", function(){ wordSetSize(parseInt(this.value, 10)); });
+  var wf = $("wFind");
+  if (wf) wf.addEventListener("click", wordFindDialog);
+  var wp = $("wPrint");
+  if (wp) wp.addEventListener("click", function(){ window.print(); });
+}
+
+/* ---------- find & replace ----------
+   Plain text search over the contenteditable: the first match is selected so
+   the caret lands on it, and replace-all rewrites the text nodes in place. */
+function wordTextNodes(){
+  var out = [], w = document.createTreeWalker(wordDoc, NodeFilter.SHOW_TEXT, null);
+  var n;
+  while ((n = w.nextNode())){
+    if (!n.nodeValue) continue;
+    var p = n.parentNode;
+    if (p && (p.tagName === "SCRIPT" || p.tagName === "STYLE")) continue;
+    out.push(n);
+  }
+  return out;
+}
+function wordFindOne(needle, fromNode, fromOffset){
+  var nodes = wordTextNodes();
+  var startAt = 0;
+  if (fromNode){
+    var i = nodes.indexOf(fromNode);
+    if (i >= 0) startAt = i;
+  }
+  for (var k = 0; k < nodes.length; k++){
+    var idx = nodes[(startAt + k) % nodes.length];
+    var off = (k === 0 && fromOffset) ? fromOffset : 0;
+    var hay = idx.nodeValue;
+    var at = hay.toLowerCase().indexOf(needle.toLowerCase(), off);
+    if (at < 0) continue;
+    var rg = document.createRange();
+    rg.setStart(idx, at);
+    rg.setEnd(idx, at + needle.length);
+    var s = window.getSelection();
+    s.removeAllRanges();
+    s.addRange(rg);
+    idx.parentNode.scrollIntoView({block: "nearest"});
+    return {node: idx, start: at, end: at + needle.length};
+  }
+  return null;
+}
+function wordReplaceAll(needle, withText){
+  var nodes = wordTextNodes(), count = 0, lower = needle.toLowerCase();
+  nodes.forEach(function(n){
+    var v = n.nodeValue, out = "", i = 0, low = v.toLowerCase();
+    while (i < v.length){
+      var at = low.indexOf(lower, i);
+      if (at < 0){ out += v.slice(i); break; }
+      out += v.slice(i, at) + withText;
+      i = at + needle.length;
+      count++;
+    }
+    if (count) n.nodeValue = out;
+  });
+  return count;
+}
+function wordFindDialog(){
+  var box = $("findBox");
+  if (!box) return;
+  box.hidden = false;
+  var find = $("findInput"), repl = $("replInput"), out = $("findOut");
+  out.textContent = "";
+  find.focus();
+  find.select();
+  var run = function(all){
+    var needle = find.value;
+    if (!needle) return 0;
+    if (all){
+      var n = wordReplaceAll(needle, repl.value);
+      out.textContent = n ? (n + " مورد جایگزین شد") : "موردی یافت نشد";
+      return n;
+    }
+    var cur = window.getSelection();
+    var anchor = cur && cur.anchorNode;
+    var sameText = anchor && wordTextNodes().indexOf(anchor) >= 0;
+    var hit = wordFindOne(needle, sameText ? anchor : null,
+      sameText && cur.anchorOffset < cur.focusOffset ? cur.focusOffset : 0);
+    out.textContent = hit ? "" : "موردی یافت نشد";
+    return hit ? 1 : 0;
+  };
+  $("findNext").onclick = function(){ run(false); };
+  $("findPrev").onclick = function(){
+    var needle = find.value;
+    if (!needle) return;
+    var cur = window.getSelection();
+    var hit = wordFindOne(needle, null, 0);
+    /* walk forward until we pass the caret, then wrap and take the last hit */
+    var sel0 = cur && cur.anchorNode;
+    while (hit && sel0 && hit.node === sel0 && hit.start >= cur.focusOffset){
+      hit = wordFindOne(needle, hit.node, hit.end);
+    }
+    $("findOut").textContent = hit ? "" : "موردی یافت نشد";
+  };
+  $("findAll").onclick = function(){ run(true); };
+  $("findClose").onclick = function(){ box.hidden = true; };
+  find.onkeydown = function(e){
+    if (e.key === "Enter"){ e.preventDefault(); run(false); }
+    if (e.key === "Escape"){ box.hidden = true; }
+  };
 }
 
 function wordBoot(){
   document.body.className = "k-word";
   $("footKind").textContent = "ویرایشگر متن";
   $("footHint").textContent = "Ctrl+B بولد · Ctrl+I ایتالیک · Ctrl+U زیرخط";
-  wireWordToolbar();
   if (!wordSupported(EXT)){
     showNotice("این فرمت در مرورگر ویرایش نمی‌شود",
       "فرمت ." + EXT + " را نمی‌توان اینجا باز کرد. فایل را دانلود کنید یا در Word باز کنید.");
@@ -1392,18 +1706,9 @@ function wordBoot(){
     $("footInfo").textContent = wordDoc.textContent.trim().length + " نویسه";
     if (!canSaveWordAs){
       $("saveBtn").textContent = "دانلود نسخه ویرایش‌شده";
-      $("saveBtn").addEventListener("click", function(){
-        setStatus("در حال ساخت فایل...");
-        blocksOf(wordDoc);
-        buildDocxFromBlocks(blocksWithLevels()).then(function(bytes){
-          downloadBytes(bytes, stemOf(NAME) + ".docx",
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
-          setStatus("دانلود شد", "ok");
-        });
-      });
     }
   }).catch(function(err){
-    showNotice("خطا در باز کردن فایل", String((err && err.message) || err));
+    showOpenError(err);
   });
 }
 function blocksWithLevels(){
@@ -1451,7 +1756,18 @@ function wordSave(){
   if (canSaveWordAs === "rtf"){
     return saveText(buildRtfFromBlocks(blocksWithLevels()));
   }
-  return Promise.resolve(false);
+  /* formats the browser cannot write back (.odt, .doc, ...) leave as a
+     freshly built .docx the user downloads instead of overwriting the original */
+  if (!wordDoc.childElementCount){
+    return Promise.resolve(false);
+  }
+  setStatus("در حال ساخت فایل...");
+  return buildDocxFromBlocks(blocksWithLevels()).then(function(bytes){
+    downloadBytes(bytes, stemOf(NAME) + ".docx",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+    setStatus("دانلود شد", "ok");
+    return true;
+  });
 }
 /* ===================== SHEET ===================== */
 function zipFiles(files, mime){
@@ -1715,7 +2031,21 @@ function cellStyleAttr(cell){
   if (s.bg) st += "background:" + hexCss(s.bg) + ";";
   if (s.sz) st += "font-size:" + (s.sz * 96 / 72).toFixed(1) + "px;";
   if (s.align) st += "text-align:" + s.align + ";";
+  if (s.wrap) st += "white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.25;";
   return st;
+}
+/* Cells covered by a merge are drawn by the anchor cell only. */
+function mergeCoverOf(sh, r, c){
+  var m = null;
+  for (var i = 0; i < sh.merges.length; i++){
+    var k = sh.merges[i];
+    if (r >= k.r1 && r <= k.r2 && c >= k.c1 && c <= k.c2){
+      if (!m || (k.r2 - k.r1) * 1000 + (k.c2 - k.c1) < (m.r2 - m.r1) * 1000 + (m.c2 - m.c1)) m = k;
+    }
+  }
+  if (!m) return null;
+  return {m: m, anchor: r === m.r1 && c === m.c1,
+          span: (m.r2 - m.r1 + 1) + "x" + (m.c2 - m.c1 + 1)};
 }
 function renderGrid(){
   var sh = curSheet();
@@ -1729,17 +2059,21 @@ function renderGrid(){
   for (var r = 0; r < nRows; r++){
     h.push('<tr><th class="rh" data-r="' + r + '">' + (r + 1) + "</th>");
     for (c = 0; c < nCols; c++){
+      var mv = mergeCoverOf(sh, r, c);
+      if (mv && !mv.anchor){ h.push('<td class="merged"></td>'); continue; }
       var cell = sh.cells[addrOf(r, c)];
-      var cls = [], txt = "";
+      var cls = [], txt = "", style = cell ? cellStyleAttr(cell) : "";
       if (cell){
         txt = displayOf(cell);
         if (cell.t === "e") cls.push("err");
         else if (cell.t === "n" || cell.t === "d") cls.push("num");
       }
       if (r % 2 === 1) cls.push("alt");
+      if (mv) cls.push("mrg");
       h.push('<td data-r="' + r + '" data-c="' + c + '"' +
         (cls.length ? ' class="' + cls.join(" ") + '"' : "") +
-        (cell && cellStyleAttr(cell) ? ' style="' + cellStyleAttr(cell) + '"' : "") +
+        (mv ? ' rowspan="' + (mv.m.r2 - r + 1) + '" colspan="' + (mv.m.c2 - c + 1) + '"' : "") +
+        (style ? ' style="' + style + '"' : "") +
         ">" + esc(txt) + "</td>");
     }
     h.push("</tr>");
@@ -1752,10 +2086,23 @@ function renderGrid(){
   rowThs = [];
   var trs = wrap.querySelectorAll("tbody tr");
   for (r = 0; r < trs.length; r++){
-    var row = [];
+    /* a merged anchor covers the cells after it, so the map is rebuilt from
+       the row/colspan attributes instead of the position in the row */
+    tds[r] = new Array(nCols);
     var tcells = trs[r].querySelectorAll("td");
-    for (c = 0; c < tcells.length; c++) row.push(tcells[c]);
-    tds.push(row);
+    var col = 0;
+    for (c = 0; c < tcells.length; c++){
+      var td = tcells[c];
+      var rs = parseInt(td.getAttribute("rowspan") || "1", 10) || 1;
+      var cs = parseInt(td.getAttribute("colspan") || "1", 10) || 1;
+      for (var dr = 0; dr < rs; dr++){
+        for (var dc = 0; dc < cs; dc++){
+          if (!tds[r + dr]) tds[r + dr] = new Array(nCols);
+          if (col + dc < nCols) tds[r + dr][col + dc] = td;
+        }
+      }
+      col += cs;
+    }
     var rh = trs[r].querySelector("th.rh");
     if (rh) rowThs.push(rh);
   }
@@ -2105,9 +2452,12 @@ function sheetCellStyle(cmd, val){
       else if (cmd === "fontName") s.font = val;
       else if (cmd === "fontSize") s.sz = val;
       else if (cmd === "align") s.align = val;
+      else if (cmd === "wrap") s.wrap = val ? true : undefined;
       else if (cmd === "fmt") s.fmt = val || undefined;
       if (Object.keys(s).length === 0) delete cell.s;
-      if (cell.t === "s" && cell.v === "" && !cell.f) delete sh.cells[addr];
+      /* an empty cell keeps its formatting - Excel does the same, and a wrap or
+         an alignment on an empty cell would otherwise be lost on reload */
+      if (cell.t === "s" && cell.v === "" && !cell.f && !cell.s) delete sh.cells[addr];
     }
   }
   renderGrid();
@@ -2949,10 +3299,11 @@ function buildXlsx(){
     xfId: function(st, fmt){
       var fontId = S.fontId(st), fillId = S.fillId(st), numFmtId = S.numFmtId(fmt);
       var align = (st && st.align) || "";
-      var k = fontId + "|" + fillId + "|" + numFmtId + "|" + align;
+      var wrap = (st && st.wrap) ? 1 : 0;
+      var k = fontId + "|" + fillId + "|" + numFmtId + "|" + align + "|" + wrap;
       if (!(k in S.xfKey)){
         S.xfKey[k] = S.xfs.length;
-        S.xfs.push({fontId: fontId, fillId: fillId, numFmtId: numFmtId, align: align});
+        S.xfs.push({fontId: fontId, fillId: fillId, numFmtId: numFmtId, align: align, wrap: wrap});
       }
       return S.xfKey[k];
     },
@@ -2999,9 +3350,10 @@ function buildXlsx(){
         if (xf.fontId) attrs += ' applyFont="1"';
         if (xf.fillId) attrs += ' applyFill="1"';
         if (xf.numFmtId) attrs += ' applyNumberFormat="1"';
-        if (xf.align){
-          x += "<xf" + attrs + ' applyAlignment="1"><alignment horizontal="' + xf.align +
-               '" vertical="center"/></xf>';
+        if (xf.align || xf.wrap){
+          x += "<xf" + attrs + ' applyAlignment="1"><alignment' +
+               (xf.align ? ' horizontal="' + xf.align + '"' : "") +
+               ' vertical="center"' + (xf.wrap ? ' wrapText="1"' : "") + "/></xf>";
         } else x += "<xf" + attrs + "/>";
       });
       x += "</cellXfs>";
@@ -3080,18 +3432,22 @@ function buildDelimited(sep){
   var sh = curSheet();
   var lines = [];
   for (var r = 0; r < sh.nRows; r++){
-    var has = false, cells = [];
+    var last = -1, cells = [];
     for (var c = 0; c < sh.nCols; c++){
       var cell = sh.cells[addrOf(r, c)];
       var txt = cell ? displayOf(cell) : "";
-      if (txt !== "") has = true;
-      if (txt.indexOf('"') >= 0 || txt.indexOf(sep) >= 0 ||
-          txt.indexOf("\n") >= 0 || txt.indexOf("\r") >= 0){
-        txt = '"' + txt.replace(/"/g, '""') + '"';
-      }
+      if (txt !== "") last = c;
       cells.push(txt);
     }
-    if (has) lines.push(cells.join(sep));
+    if (last < 0) continue;             /* empty row - keep it out of the file */
+    for (var k = 0; k <= last; k++){
+      var t = cells[k];
+      if (t.indexOf('"') >= 0 || t.indexOf(sep) >= 0 ||
+          t.indexOf("\n") >= 0 || t.indexOf("\r") >= 0){
+        cells[k] = '"' + t.replace(/"/g, '""') + '"';
+      }
+    }
+    lines.push(cells.slice(0, last + 1).join(sep));
   }
   return lines.join("\r\n");
 }
@@ -3140,6 +3496,10 @@ function syncSheetToolbar(){
   if (s.sz && SIZES.indexOf(s.sz) >= 0) fs.value = String(s.sz);
   var fm = $("fmtSel");
   if (fm && fm.value !== (s.fmt || "")) fm.value = s.fmt || "";
+  var wb = $("shWrap");
+  if (wb) wb.classList.toggle("on", !!s.wrap);
+  var mg = $("shMerge");
+  if (mg) mg.classList.toggle("on", !!mergeCoverOf(curSheet(), sel.r, sel.c));
 }
 function wireSheetToolbar(){
   $("ffSel").addEventListener("change", function(){ sheetCellStyle("fontName", this.value); });
@@ -3147,6 +3507,258 @@ function wireSheetToolbar(){
   $("fgCol").addEventListener("change", function(){ sheetCellStyle("foreColor", this.value); });
   $("bgCol").addEventListener("change", function(){ sheetCellStyle("backColor", this.value); });
   $("fmtSel").addEventListener("change", function(){ sheetCellStyle("fmt", this.value); });
+}
+/* ---------- extra spreadsheet tools (ribbon) ---------- */
+function selBox(){
+  return {
+    r1: Math.min(sel.r, sel.r2), r2: Math.max(sel.r, sel.r2),
+    c1: Math.min(sel.c, sel.c2), c2: Math.max(sel.c, sel.c2)
+  };
+}
+function eachSelected(fn){
+  var b = selBox();
+  for (var r = b.r1; r <= b.r2; r++) for (var c = b.c1; c <= b.c2; c++) fn(r, c, addrOf(r, c));
+}
+function cellOrBlank(r, c){
+  var sh = curSheet(), a = addrOf(r, c);
+  if (!sh.cells[a]) sh.cells[a] = {t: "s", v: ""};
+  return sh.cells[a];
+}
+function sheetClearCells(){
+  pushUndo();
+  eachSelected(function(r, c, addr){ delete curSheet().cells[addr]; });
+  recalcAll(); renderGrid(); updateSelInfo();
+}
+function sheetDecimals(step){
+  var sh = curSheet();
+  pushUndo();
+  eachSelected(function(r, c, addr){
+    var cell = sh.cells[addr];
+    if (!cell || cell.t !== "n") return;
+    /* a plain cell gets a plain format first, then the format carries the
+       decimals - that is what Excel shows after "increase decimal" */
+    var fmt = cell.fmt || "0.0";
+    var m = /^([^\.]*)(0+)(\.(0+))?$/.exec(fmt);
+    if (m){
+      var zeros = (m[4] ? m[4].length : 0) + step;
+      if (zeros < 0) zeros = 0;
+      cell.fmt = zeros ? m[1] + "0." + new Array(zeros + 1).join("0") : m[1];
+    } else {
+      cell.v = Number(cell.v.toFixed(Math.max(0, 2 + step)));
+    }
+    if (cell.fmt === "General") delete cell.fmt;
+  });
+  recalcAll(); renderGrid(); syncSheetToolbar(); updateSelInfo();
+}
+/* AutoSum walks up/left through empty cells and stops at the first cell that
+   holds something else, the way Excel picks its range */
+function numbersAbove(b){
+  var sh = curSheet(), out = [], gaps = 0;
+  for (var r = b.r1 - 1; r >= 0 && gaps < 50; r--){
+    var has = false;
+    for (var c = b.c1; c <= b.c2; c++){
+      var cell = sh.cells[addrOf(r, c)];
+      if (!cell) continue;
+      if (cell.t === "n" || cell.t === "d" || cell.t === "b"){ has = true; break; }
+      if (cell.t === "e" || String(cell.v || "") !== "") return out.reverse();  /* text boundary */
+    }
+    if (has){ out.push(r); gaps = 0; }
+    else gaps++;
+  }
+  return out.reverse();
+}
+function numbersLeft(b){
+  var sh = curSheet(), out = [], gaps = 0;
+  for (var c = b.c1 - 1; c >= 0 && gaps < 50; c--){
+    var has = false;
+    for (var r = b.r1; r <= b.r2; r++){
+      var cell = sh.cells[addrOf(r, c)];
+      if (!cell) continue;
+      if (cell.t === "n" || cell.t === "d" || cell.t === "b"){ has = true; break; }
+      if (cell.t === "e" || String(cell.v || "") !== "") return out.reverse();
+    }
+    if (has){ out.push(c); gaps = 0; }
+    else gaps++;
+  }
+  return out.reverse();
+}
+/* "B2:B5" for a block, "B2,B7" only when the block is not contiguous */
+function refList(rows, cols, sep){
+  if (rows.length > 1 && cols.length > 1){
+    return addrOf(rows[0], cols[0]) + ":" + addrOf(rows[rows.length - 1], cols[cols.length - 1]);
+  }
+  if (rows.length > 1) return addrOf(rows[0], cols[0]) + ":" + addrOf(rows[rows.length - 1], cols[0]);
+  if (cols.length > 1) return addrOf(rows[0], cols[0]) + ":" + addrOf(rows[0], cols[cols.length - 1]);
+  return addrOf(rows[0] || 0, cols[0] || 0);
+}
+function sheetAutoFn(fn){
+  var b = selBox();
+  var rows = numbersAbove(b), cols = numbersLeft(b);
+  var use = rows.length ? rows : cols;
+  var useSep = rows.length ? "," : "";
+  if (!use.length){
+    setStatus("سلول عددی بالای یا کنار این محدوده نیست", "err");
+    return;
+  }
+  pushUndo();
+  var args = refList(use, rows.length ? [b.c1, b.c2] : [b.r1, b.r2], useSep);
+  setCellValue(b.r2, b.c2, "=" + fn + "(" + args + ")");
+}function sheetFill(dir){
+  var b = selBox();
+  if (b.r1 === b.r2 && b.c1 === b.c2){
+    setStatus("برای پر کردن، محدوده را انتخاب کنید", "err");
+    return;
+  }
+  pushUndo();
+  var sh = curSheet();
+  var srcR = dir === "down" ? b.r1 : sel.r;
+  var srcC = dir === "right" ? b.c1 : sel.c;
+  var src = sh.cells[addrOf(srcR, srcC)];
+  if (!src){ setStatus("اولین سلول محدوده خالی است", "err"); return; }
+  var proto = JSON.parse(JSON.stringify(src));
+  for (var r = b.r1; r <= b.r2; r++){
+    for (var c = b.c1; c <= b.c2; c++){
+      if (r === srcR && c === srcC) continue;
+      sh.cells[addrOf(r, c)] = JSON.parse(JSON.stringify(proto));
+    }
+  }
+  recalcAll(); renderGrid(); updateSelInfo();
+}
+function cellSortValue(cell){
+  if (!cell) return null;
+  if (cell.t === "n" || cell.t === "d") return cell.v;
+  if (cell.t === "b") return cell.v ? 1 : 0;
+  return String(cell.v == null ? "" : cell.v);
+}
+function sheetSort(dir){
+  var sh = curSheet();
+  var useCols = (sel.c2 > sel.c);
+  var r1 = 0, r2 = sh.nRows - 1, c1 = 0, c2 = sh.nCols - 1;
+  var keyC = sel.c, keyR = sel.r;
+  if (useCols){
+    c1 = sel.c; c2 = sel.c2;
+    r1 = (sel.r2 > sel.r) ? sel.r : 0;
+    r2 = (sel.r2 > sel.r) ? sel.r2 : sh.nRows - 1;
+  } else {
+    r1 = sel.r; r2 = sel.r2;
+    c1 = (sel.c2 > sel.c) ? sel.c : 0;
+    c2 = (sel.c2 > sel.c) ? sel.c2 : sh.nCols - 1;
+  }
+  pushUndo();
+  var rows = [];
+  for (var r = r1; r <= r2; r++){
+    var cells = [];
+    for (var c = c1; c <= c2; c++) cells.push(sh.cells[addrOf(r, c)] || null);
+    /* sorting rows keys on the chosen column, sorting columns on the row */
+    var key = useCols ? cellSortValue(cells[keyR - r1]) : cellSortValue(cells[keyC - c1]);
+    rows.push({key: key, cells: cells});
+  }
+  rows.sort(function(a, b2){
+    var an = a.key === null, bn = b2.key === null;
+    if (an && bn) return 0;
+    if (an) return 1;                      /* empty cells always go last */
+    if (bn) return -1;
+    var x = a.key, y = b2.key;
+    if (typeof x === "number" && typeof y === "number") return dir > 0 ? x - y : y - x;
+    x = String(x).toLowerCase(); y = String(y).toLowerCase();
+    return dir > 0 ? (x < y ? -1 : x > y ? 1 : 0) : (x < y ? 1 : x > y ? -1 : 0);
+  });
+  rows.forEach(function(row, i){
+    var r2 = r1 + i;
+    row.cells.forEach(function(cell, j){
+      var a = addrOf(r2, c1 + j);
+      if (cell) sh.cells[a] = cell; else delete sh.cells[a];
+    });
+  });
+  recalcAll(); renderGrid(); updateSelInfo();
+}
+function sheetMerge(){
+  var sh = curSheet();
+  var b = selBox();
+  if (b.r1 === b.r2 && b.c1 === b.c2){ setStatus("بیش از یک سلول انتخاب کنید", "err"); return; }
+  pushUndo();
+  var keep = sh.cells[addrOf(b.r1, b.c1)];
+  sh.merges = sh.merges.filter(function(m){
+    return !(m.r1 <= b.r2 && m.r2 >= b.r1 && m.c1 <= b.c2 && m.c2 >= b.c1);
+  });
+  sh.merges.push({r1: b.r1, c1: b.c1, r2: b.r2, c2: b.c2});
+  for (var r = b.r1; r <= b.r2; r++){
+    for (var c = b.c1; c <= b.c2; c++){
+      if (r === b.r1 && c === b.c1) continue;
+      var a = addrOf(r, c);
+      if (sh.cells[a]){ if (!keep) keep = sh.cells[a]; else delete sh.cells[a]; }
+    }
+  }
+  if (keep) sh.cells[addrOf(b.r1, b.c1)] = keep;
+  renderGrid(); updateSelInfo();
+}
+function sheetUnmergeAt(r, c){
+  var sh = curSheet();
+  var hit = null;
+  sh.merges.forEach(function(m){
+    if (r >= m.r1 && r <= m.r2 && c >= m.c1 && c <= m.c2) hit = m;
+  });
+  if (!hit) return false;
+  pushUndo();
+  sh.merges = sh.merges.filter(function(m){ return m !== hit; });
+  renderGrid(); syncSheetToolbar();
+  return true;
+}
+function sheetRename(){
+  var sh = curSheet();
+  var nm = window.prompt("نام برگه:", sh.name);
+  if (nm == null) return;
+  nm = String(nm).replace(/[\\/?*\[\]:]/g, "").trim().slice(0, 31);
+  if (!nm || nm === sh.name) return;
+  if (WB.sheets.some(function(s){ return s !== sh && s.name === nm; })){
+    setStatus("برگه‌ای با این نام هست", "err");
+    return;
+  }
+  pushUndo();
+  sh.name = nm;
+  renderTabs(); renderGrid();
+}
+function sheetDelete(){
+  if (WB.sheets.length <= 1){ setStatus("حداقل یک برگه باید بماند", "err"); return; }
+  if (!window.confirm("برگه " + curSheet().name + " حذف شود؟")) return;
+  pushUndo();
+  WB.sheets.splice(WB.cur, 1);
+  if (WB.cur >= WB.sheets.length) WB.cur = WB.sheets.length - 1;
+  renderTabs(); renderGrid(); resetSel(); updateSelInfo();
+}
+function sheetNewTab(){
+  pushUndo();
+  var n = 1;
+  while (WB.sheets.some(function(s){ return s.name === "Sheet" + n; })) n++;
+  WB.sheets.push(newSheet("Sheet" + n));
+  WB.cur = WB.sheets.length - 1;
+  renderTabs(); renderGrid(); resetSel(); updateSelInfo();
+}
+function wireSheetRibbon(){
+  var on = function(id, fn){ var el = $(id); if (el) el.addEventListener("click", fn); };
+  on("shWrap", function(){
+    var s = sheetActiveStyle();
+    sheetCellStyle("wrap", !s.wrap);
+    syncSheetToolbar();
+  });
+  on("shMerge", function(){
+    if (sheetUnmergeAt(sel.r, sel.c)) return;
+    sheetMerge();
+  });
+  on("shDecPlus", function(){ sheetDecimals(1); });
+  on("shDecMinus", function(){ sheetDecimals(-1); });
+  on("shClear", sheetClearCells);
+  on("shSum", function(){ sheetAutoFn("SUM"); });
+  on("shAvg", function(){ sheetAutoFn("AVERAGE"); });
+  on("shCount", function(){ sheetAutoFn("COUNT"); });
+  on("shFillDown", function(){ sheetFill("down"); });
+  on("shFillRight", function(){ sheetFill("right"); });
+  on("shSortAsc", function(){ sheetSort(1); });
+  on("shSortDesc", function(){ sheetSort(-1); });
+  on("shNewSheet", sheetNewTab);
+  on("shRenameSheet", sheetRename);
+  on("shDelSheet", sheetDelete);
+  on("shPrint", function(){ window.print(); });
 }
 function wireSheetKeys(){
   document.addEventListener("keydown", function(e){
@@ -3191,9 +3803,6 @@ function sheetBoot(){
   document.body.className = "k-sheet";
   $("footKind").textContent = "صفحه‌گسترده";
   $("footHint").textContent = "Enter ویرایش · Tab سلول بعد · دو کلیک برای تغییر";
-  wireSheet();
-  wireSheetToolbar();
-  wireSheetKeys();
   if (!sheetSupported(EXT)){
     showNotice("این فرمت در مرورگر ویرایش نمی‌شود",
       "فرمت ." + EXT + " را نمی‌توان اینجا باز کرد. فایل را دانلود کنید.");
@@ -3217,7 +3826,7 @@ function sheetBoot(){
     $("footInfo").textContent = WB.sheets.length + " برگه · " +
       Object.keys(curSheet().cells).length + " سلول پر";
   }).catch(function(err){
-    showNotice("خطا در باز کردن فایل", String((err && err.message) || err));
+    showOpenError(err);
   });
 }
 /* ===================== SLIDE ===================== */
@@ -3227,7 +3836,7 @@ var RR_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships
 var SLIDES = [];
 var slideIdx = 0;
 var sldCx = 12192000, sldCy = 6858000;
-var activeBlk = null, dragBlk = null, presentIdx = 0;
+var activeBlk = null, dragBlk = null, presentIdx = 0, activeShape = null;
 
 function nsAll(root, ns, name){
   return Array.prototype.slice.call(root.getElementsByTagNameNS(ns, name));
@@ -3473,6 +4082,7 @@ function renderSlide(){
     img.style.height = im.h + "%";
     canvas.appendChild(img);
   });
+  shapeList().forEach(function(sh, i){ canvas.appendChild(shapeEl(sh, i)); });
   fitCanvasFont();
 }
 function fitCanvasFont(){
@@ -3501,6 +4111,16 @@ function syncSlideFromDom(){
     b.align = el.style.textAlign || "";
     b.color = normHex(el.style.color);
     b.font = el.style.fontFamily ? String(el.style.fontFamily).split(",")[0].replace(/["']/g, "").trim() : "";
+  });
+  var shs = sl.shapes || [];
+  Array.prototype.forEach.call($("scanvas").querySelectorAll(".sshp"), function(el){
+    var sh = shs[+el._si];
+    if (!sh) return;
+    sh.x = parseFloat(el.style.left) || 0;
+    sh.y = parseFloat(el.style.top) || 0;
+    sh.w = parseFloat(el.style.width) || 20;
+    var hgt = parseFloat(el.style.height) || 0;
+    if (hgt) sh.h = hgt;
   });
 }
 function renderThumbs(){
@@ -3532,6 +4152,14 @@ function renderThumbs(){
       img.style.cssText = "position:absolute;left:" + im.x + "%;top:" + im.y + "%;width:" +
         im.w + "%;height:" + im.h + "%;object-fit:contain";
       mini.appendChild(img);
+    });
+    (sl.shapes || []).forEach(function(sh){
+      var d = document.createElement("div");
+      d.style.cssText = "position:absolute;left:" + sh.x + "%;top:" + sh.y + "%;width:" +
+        (sh.w || 20) + "%;height:" + ((sh.h || 0)) + "%;background:" + (sh.fill || "#3b82f6") +
+        ";border-radius:" + (sh.kind === "ellipse" ? "50%" : "2px");
+      if (sh.kind === "line") d.style.background = sh.line || "#334155";
+      mini.appendChild(d);
     });
     t.appendChild(n);
     t.appendChild(mini);
@@ -3599,6 +4227,88 @@ function slideAddText(){
     s.addRange(rg);
   }
 }
+/* ---------- shapes, images and stacking ----------
+   A slide keeps its text in ``blocks``, its pictures in ``images`` and its
+   autoshapes in ``shapes``; they are drawn in that order, so a shape always
+   sits above the text and the stacking buttons work inside each list. */
+function shapeList(){
+  var sl = SLIDES[slideIdx];
+  if (sl && !sl.shapes) sl.shapes = [];
+  return sl ? sl.shapes : [];
+}
+function shapeEl(sh, i){
+  var el = document.createElement("div");
+  el.className = "sshp sshp-" + (sh.kind || "rect");
+  el._si = i;
+  var w = sh.w || 24, h = sh.h || 18;
+  el.style.left = sh.x + "%";
+  el.style.top = sh.y + "%";
+  el.style.width = w + "%";
+  el.style.height = h + "%";
+  el.style.background = sh.fill || "#3b82f6";
+  if (sh.line) el.style.borderColor = sh.line;
+  if (sh.kind === "line"){
+    el.style.background = sh.line || "#334155";
+    el.style.height = "0";
+    el.style.borderTop = "3px solid " + (sh.line || "#334155");
+  }
+  return el;
+}
+function slideAddShape(kind){
+  syncSlideFromDom();
+  pushUndo();
+  var sh = {kind: kind, x: 34, y: 34, w: kind === "line" ? 40 : 26, h: kind === "line" ? 0 : 22,
+            fill: kind === "line" ? "" : "#3b82f6", line: kind === "line" ? "#334155" : ""};
+  shapeList().push(sh);
+  renderSlide(); renderThumbs(); markSlideDirty();
+  var els = $("scanvas").querySelectorAll(".sshp");
+  if (els.length) activeShape = els[els.length - 1];
+}
+function slideAddImage(){
+  syncSlideFromDom();
+  $("imgInput").click();
+}
+function slideSelIndex(){
+  if (activeBlk && $("scanvas").contains(activeBlk)) return {list: "blocks", i: +activeBlk._bi};
+  if (activeShape && $("scanvas").contains(activeShape)) return {list: "shapes", i: +activeShape._si};
+  return null;
+}
+function slideMove(dir){
+  var pick = slideSelIndex();
+  if (!pick) return;
+  var sl = SLIDES[slideIdx];
+  var arr = pick.list === "blocks" ? sl.blocks : shapeList();
+  var j = pick.i + dir;
+  if (j < 0 || j >= arr.length) return;
+  pushUndo();
+  var tmp = arr[pick.i];
+  arr[pick.i] = arr[j];
+  arr[j] = tmp;
+  /* the redraw replaces every element, so the selection is re-taken at the
+     shape's new position - otherwise the next click would be a no-op */
+  var moved = j;
+  renderSlide(); renderThumbs(); markSlideDirty();
+  if (pick.list === "blocks"){
+    var blks = $("scanvas").querySelectorAll(".sblk");
+    if (blks[moved]) activeBlk = blks[moved];
+    activeShape = null;
+  } else {
+    var shs = $("scanvas").querySelectorAll(".sshp");
+    if (shs[moved]) activeShape = shs[moved];
+    activeBlk = null;
+  }
+}
+function slideDeleteSel(){
+  var pick = slideSelIndex();
+  if (!pick) return;
+  var sl = SLIDES[slideIdx];
+  var arr = pick.list === "blocks" ? sl.blocks : shapeList();
+  pushUndo();
+  arr.splice(pick.i, 1);
+  activeBlk = null;
+  activeShape = null;
+  renderSlide(); renderThumbs(); markSlideDirty();
+}
 /* ---------- pptx save (edit the original package, keep untouched parts) ---------- */
 var PKG_NS = "http://schemas.openxmlformats.org/package/2006/relationships";
 var CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types";
@@ -3636,6 +4346,45 @@ function appendXfrm(doc, owner, x, y, w, h){
   var geom = mkEl(doc, A_NS, "a:prstGeom", {prst: "rect"});
   geom.appendChild(mkEl(doc, A_NS, "a:avLst"));
   owner.appendChild(geom);
+}
+function makeShapeXml(doc, sh, id){
+  var sp = mkEl(doc, P_NS, "p:sp");
+  var nv = mkEl(doc, P_NS, "p:nvSpPr");
+  var kind = sh.kind || "rect";
+  nv.appendChild(mkEl(doc, P_NS, "p:cNvPr", {id: String(id), name: (kind === "ellipse" ? "Oval" : "Shape") + " " + id}));
+  sp.appendChild(nv);
+  sp.appendChild(mkEl(doc, P_NS, "p:cNvSpPr"));
+  sp.appendChild(mkEl(doc, P_NS, "p:nvPr"));
+  var spPr = mkEl(doc, P_NS, "p:spPr");
+  var w = (sh.w || 20) / 100 * sldCx;
+  var h = (sh.h || 20) / 100 * sldCy;
+  if (kind === "line"){
+    /* a straight connector keeps a zero height, like PowerPoint draws it */
+    appendXfrm(doc, spPr, sh.x / 100 * sldCx, sh.y / 100 * sldCy, w, 0);
+    var geom = mkEl(doc, A_NS, "a:prstGeom", {prst: "line"});
+    geom.appendChild(mkEl(doc, A_NS, "a:avLst"));
+    spPr.appendChild(geom);
+    var ln = mkEl(doc, A_NS, "a:ln", {w: "28575"});
+    var lf = mkEl(doc, A_NS, "a:solidFill");
+    lf.appendChild(mkEl(doc, A_NS, "a:srgbClr", {val: String(sh.line || "#334155").replace("#", "")}));
+    ln.appendChild(lf);
+    spPr.appendChild(ln);
+    sp.appendChild(spPr);
+    return sp;
+  }
+  appendXfrm(doc, spPr, sh.x / 100 * sldCx, sh.y / 100 * sldCy, w, h);
+  var g2 = mkEl(doc, A_NS, "a:prstGeom", {prst: kind === "ellipse" ? "ellipse" : "rect"});
+  g2.appendChild(mkEl(doc, A_NS, "a:avLst"));
+  spPr.appendChild(g2);
+  if (sh.fill){
+    var sf = mkEl(doc, A_NS, "a:solidFill");
+    sf.appendChild(mkEl(doc, A_NS, "a:srgbClr", {val: String(sh.fill).replace("#", "")}));
+    spPr.appendChild(sf);
+  } else {
+    spPr.appendChild(mkEl(doc, A_NS, "a:noFill"));
+  }
+  sp.appendChild(spPr);
+  return sp;
 }
 function makeSpXml(doc, b, id){
   var sp = mkEl(doc, P_NS, "p:sp");
@@ -3730,13 +4479,16 @@ function writeSlideXml(origXml, slide, addMedia){
   var root = doc.documentElement;
   var cSld = nsOne(root, P_NS, "cSld");
   var oldBg = nsOne(cSld, P_NS, "bg");
-  if (oldBg) cSld.removeChild(oldBg);
+  /* an older save may have parked the bg inside a wrapper element, so detach
+     it from wherever it sits instead of assuming it hangs off cSld */
+  if (oldBg && oldBg.parentNode) oldBg.parentNode.removeChild(oldBg);
   if (slide.bg){
-    var bgFrag = parseXmlStr('<r xmlns:p="' + P_NS + '" xmlns:a="' + A_NS + '">' +
-      '<p:bg><p:bgPr><a:solidFill><a:srgbClr val="' +
+    var bgFrag = parseXmlStr('<p:bg xmlns:p="' + P_NS + '" xmlns:a="' + A_NS + '">' +
+      '<p:bgPr><a:solidFill><a:srgbClr val="' +
       String(slide.bg).replace("#", "").toUpperCase() +
-      '"/></a:solidFill><a:effectLst/></p:bgPr></p:bg></r>');
-    cSld.insertBefore(bgFrag.firstChild, cSld.firstChild);
+      '"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>');
+    if (bgFrag && bgFrag.documentElement)
+      cSld.insertBefore(bgFrag.documentElement, cSld.firstChild);
   }
   var spTree = nsOne(cSld, P_NS, "spTree");
   var stale = [];
@@ -3752,6 +4504,7 @@ function writeSlideXml(origXml, slide, addMedia){
       spTree.appendChild(makePicXml(doc, im, rid, id++));
     });
   });
+  (slide.shapes || []).forEach(function(sh){ spTree.appendChild(makeShapeXml(doc, sh, id++)); });
   return Promise.all(jobs).then(function(){ return serializeDoc(doc); });
 }
 function nextRIdFrom(doc){
@@ -4020,6 +4773,11 @@ function presentNav(d){
   renderPresent();
 }
 function syncSlideToolbar(){
+  var sfill = $("sFill");
+  if (sfill && activeShape && $("scanvas").contains(activeShape)){
+    var sh = shapeList()[+activeShape._si];
+    if (sh && sh.fill) sfill.value = sh.fill;
+  }
   var b = activeBlk;
   if (!b || !b.isConnected || !$("scanvas").contains(b)) return;
   try {
@@ -4031,11 +4789,23 @@ function syncSlideToolbar(){
   } catch(e){}
 }
 function wireSlideToolbar(){
-  $("sAdd").addEventListener("click", slideAdd);
-  $("sDup").addEventListener("click", slideDup);
-  $("sDel").addEventListener("click", slideDel);
-  $("sPrev").addEventListener("click", function(){ gotoSlide(slideIdx - 1); });
-  $("sNext").addEventListener("click", function(){ gotoSlide(slideIdx + 1); });
+  var on = function(id, fn){ var el = $(id); if (el) el.addEventListener("click", fn); };
+  on("sAdd", slideAdd);
+  on("sDup", slideDup);
+  on("sDel", slideDel);
+  on("sPrev", function(){ gotoSlide(slideIdx - 1); });
+  on("sNext", function(){ gotoSlide(slideIdx + 1); });
+  on("sFirst", function(){ gotoSlide(0); });
+  on("sLast", function(){ gotoSlide(SLIDES.length - 1); });
+  on("sText", slideAddText);
+  on("sImg", slideAddImage);
+  on("sRect", function(){ slideAddShape("rect"); });
+  on("sEllipse", function(){ slideAddShape("ellipse"); });
+  on("sLine", function(){ slideAddShape("line"); });
+  on("sForward", function(){ slideMove(1); });
+  on("sBackward", function(){ slideMove(-1); });
+  on("sDelBlk", slideDeleteSel);
+  on("sPrint", function(){ window.print(); });
   $("sBg").addEventListener("input", function(){
     var sl = SLIDES[slideIdx];
     if (!sl) return;
@@ -4044,7 +4814,17 @@ function wireSlideToolbar(){
     renderThumbs();
     markSlideDirty();
   });
-  $("sText").addEventListener("click", slideAddText);
+  var sfill = $("sFill");
+  if (sfill) sfill.addEventListener("input", function(){
+    var list = shapeList();
+    if (!activeShape || !this.value) return;
+    var sh = list[+activeShape._si];
+    if (!sh) return;
+    sh.fill = this.value;
+    activeShape.style.background = this.value;
+    renderThumbs();
+    markSlideDirty();
+  });
   $("sPresent").addEventListener("click", startPresent);
   $("ffSel").addEventListener("change", function(){
     if (!activeBlk || !$("scanvas").contains(activeBlk)) return;
@@ -4061,6 +4841,37 @@ function wireSlideToolbar(){
   $("pNext").addEventListener("click", function(e){ e.stopPropagation(); presentNav(1); });
   $("pExit").addEventListener("click", function(e){ e.stopPropagation(); exitPresent(); });
   $("pslide").addEventListener("click", function(){ presentNav(1); });
+  /* a picture picked for a slide goes into the slide, not the text editor */
+  $("imgInput").addEventListener("change", function(){
+    var f = this.files && this.files[0];
+    this.value = "";
+    if (!f || KIND !== "slide") return;
+    var fr = new FileReader();
+    fr.onload = function(){
+      syncSlideFromDom();
+      pushUndo();
+      var url = String(fr.result);
+      var ext = (f.name.split(".").pop() || "png").toLowerCase();
+      SLIDES[slideIdx].images.push({url: url, ext: ext, x: 30, y: 28, w: 40, h: 40});
+      renderSlide(); renderThumbs(); markSlideDirty();
+    };
+    fr.readAsDataURL(f);
+  });
+}
+function wireSlideRibbon(){
+  wireSlideToolbar();
+  wireSlideKeys();
+  wireSlideDrag();
+  $("scanvas").addEventListener("input", markSlideDirty);
+  $("scanvas").addEventListener("focusin", function(e){
+    var t = e.target;
+    if (t && t.classList && t.classList.contains("sblk")){ activeBlk = t; activeShape = null; }
+  });
+  $("scanvas").addEventListener("mousedown", function(e){
+    var sh = e.target && e.target.closest && e.target.closest(".sshp");
+    if (sh){ activeShape = sh; activeBlk = null; }
+    else if (e.target === $("scanvas")){ activeShape = null; activeBlk = null; }
+  }, true);
 }
 function wireSlideKeys(){
   document.addEventListener("keydown", function(e){
@@ -4094,6 +4905,18 @@ function wireSlideDrag(){
     var t = e.target;
     if (!t || !t.closest) return;
     if (t.closest("img.simg")){ e.preventDefault(); return; }
+    var shEl = t.closest(".sshp");
+    if (shEl){
+      var sl0 = SLIDES[slideIdx];
+      var sh = sl0 && shapeList()[+shEl._si];
+      if (!sh) return;
+      activeShape = shEl;
+      activeBlk = null;
+      dragBlk = {el: shEl, b: sh, x0: e.clientX, y0: e.clientY, ox: sh.x, oy: sh.y,
+                 moved: false, snap: snapshot()};
+      e.preventDefault();
+      return;
+    }
     var el = t.closest(".sblk");
     if (!el) return;
     var sl = SLIDES[slideIdx];
@@ -4127,6 +4950,11 @@ function wireSlideDrag(){
     var d = dragBlk;
     dragBlk = null;
     if (d.moved){ renderThumbs(); return; }
+    if (d.el.classList && d.el.classList.contains("sshp")){
+      renderSlide(); renderThumbs();
+      activeShape = $("scanvas").querySelectorAll(".sshp")[+d.el._si] || null;
+      return;
+    }
     d.el.focus();
     activeBlk = d.el;
     var rg = null;
@@ -4151,14 +4979,6 @@ function slideBoot(){
   document.body.className = "k-slide";
   $("footKind").textContent = "ارائه";
   $("footHint").textContent = "کلیک برای ویرایش · بکشید تا جابه‌جا شود · دکمه نمایش برای اجرا";
-  wireSlideToolbar();
-  wireSlideKeys();
-  wireSlideDrag();
-  $("scanvas").addEventListener("input", markSlideDirty);
-  $("scanvas").addEventListener("focusin", function(e){
-    var t = e.target;
-    if (t && t.classList && t.classList.contains("sblk")) activeBlk = t;
-  });
   if (EXT !== "pptx"){
     showNotice("این فرمت در مرورگر ویرایش نمی‌شود",
       "فرمت ." + EXT + " را فقط PowerPoint باز می‌کند. فایل را دانلود کنید.");
@@ -4177,7 +4997,7 @@ function slideBoot(){
     setStatus("");
     $("footInfo").textContent = SLIDES.length + " اسلاید";
   }).catch(function(err){
-    showNotice("خطا در باز کردن فایل", String((err && err.message) || err));
+    showOpenError(err);
   });
 }
 
@@ -4204,6 +5024,15 @@ function wireToolbarCommon(){
                  (cmd === "bold" || cmd === "italic" || cmd === "underline" || cmd === "strike")){
         sheetToggle(cmd);
         syncSheetToolbar();
+      } else if (KIND === "slide" &&
+                 (cmd === "bold" || cmd === "italic" || cmd === "underline")){
+        /* the caret has to sit inside the text box the command applies to */
+        if (activeBlk && $("scanvas").contains(activeBlk)){
+          activeBlk.focus();
+          execCss(cmd === "bold" ? "bold" : cmd === "italic" ? "italic" : "underline");
+          syncSlideFromDom();
+          renderThumbs();
+        }
       }
     });
   });
@@ -4247,9 +5076,9 @@ function wireToolbarCommon(){
     });
   });
   var fg = $("fgCol"), bg = $("bgCol");
-  fg.addEventListener("mousedown", function(){ if (KIND === "word") saveSel(); });
-  bg.addEventListener("mousedown", function(){ if (KIND === "word") saveSel(); });
-  fg.addEventListener("input", function(){
+  if (fg) fg.addEventListener("mousedown", function(){ if (KIND === "word") saveSel(); });
+  if (bg) bg.addEventListener("mousedown", function(){ if (KIND === "word") saveSel(); });
+  if (fg) fg.addEventListener("input", function(){
     if (KIND === "word"){ restoreSel(); execCss("foreColor", this.value); }
     else if (KIND === "slide"){
       if (activeBlk && $("scanvas").contains(activeBlk)){
@@ -4260,7 +5089,7 @@ function wireToolbarCommon(){
       }
     }
   });
-  bg.addEventListener("input", function(){
+  if (bg) bg.addEventListener("input", function(){
     if (KIND === "word"){ restoreSel(); execCss("backColor", this.value); }
     else if (KIND === "slide"){
       if (activeBlk && $("scanvas").contains(activeBlk)){
@@ -4275,10 +5104,10 @@ function wireToolbarCommon(){
       }
     }
   });
-  fg.addEventListener("change", function(){
+  if (fg) fg.addEventListener("change", function(){
     if (KIND === "sheet") sheetCellStyle("foreColor", this.value);
   });
-  bg.addEventListener("change", function(){
+  if (bg) bg.addEventListener("change", function(){
     if (KIND === "sheet") sheetCellStyle("backColor", this.value);
   });
 }
@@ -4292,6 +5121,7 @@ function doSheetSave(){ return doSave(); }
 function wireHeader(){
   $("backBtn").addEventListener("click", closeViewerTab);
   $("noticeBack").addEventListener("click", closeViewerTab);
+  $("noticeRetry").addEventListener("click", function(){ startBoot(); });
   $("saveBtn").addEventListener("click", function(){
     var b = this;
     if (b.disabled) return;
@@ -4300,9 +5130,7 @@ function wireHeader(){
       function(){ b.disabled = false; setStatus("خطا در ذخیره", "err"); });
   });
 }
-function boot(){
-  wireToolbarCommon();
-  wireHeader();
+function bootOnce(){
   var p;
   if (KIND === "word") p = wordBoot();
   else if (KIND === "sheet") p = sheetBoot();
@@ -4312,9 +5140,28 @@ function boot(){
     $("saveBtn").style.display = "none";
     p = Promise.resolve();
   }
-  Promise.resolve(p).then(function(){ syncToolbar(); });
+  return Promise.resolve(p).then(function(){ syncToolbar(); });
 }
-boot();
+/* One wiring pass, but the document itself may be opened again from the retry
+   button, so the boot steps have to survive a second run. */
+var wired = false;
+function startBoot(){
+  if (!wired){
+    wired = true;
+    buildRibbon();
+    initFontSelects();
+    wireToolbarCommon();
+    wireHeader();
+    if (KIND === "word") wireWordToolbar();
+    else if (KIND === "sheet"){ wireSheet(); wireSheetToolbar(); wireSheetKeys(); wireSheetRibbon(); }
+    else if (KIND === "slide") wireSlideRibbon();
+  }
+  hideNotice();
+  $("saveBtn").style.display = "";
+  $("hstat").textContent = "";
+  return bootOnce().catch(function(){ /* bootOne already showed the notice */ });
+}
+startBoot();
 
 </script>
 </body>

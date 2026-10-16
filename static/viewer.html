@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<script>try{var t=localStorage.getItem('bs-theme');var TH=['dark','light','blue','purple','orange','green','sunset'];if(TH.indexOf(t)>=0)document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>__NAME__ - Black Server</title>
+<link rel="icon" href="/favicon.ico" sizes="8681">
+<style>
+:root{
+  --bg:#070b14;--panel:#0e1628;--panel2:#111c33;--panel3:#16233d;--border:#1c2d4f;--border2:#243b66;
+  --text:#e8eefc;--text2:#8ba0c5;--text3:#5a719e;
+  --blue:#3b82f6;--blue2:#2563eb;--green:#22c55e;--amber:#f59e0b;--red:#ef4444;
+  --sel:rgba(59,130,246,.18);
+  --page-bg:#1b2438;--page-shadow:rgba(0,0,0,.55);
+}
+html[data-theme=light]{--bg:#f3f5f9;--panel:#ffffff;--panel2:#eef1f6;--panel3:#e6eaf2;--border:#d9dee8;--border2:#c8d0de;
+  --text:#111827;--text2:#4b5563;--text3:#6b7280;--sel:rgba(59,130,246,.14);--page-bg:#525a67;--page-shadow:rgba(0,0,0,.3)}
+html[data-theme=blue]{--bg:#06101f;--panel:#0b1a30;}
+html[data-theme=purple]{--bg:#0a0714;--panel:#150e28;}
+html[data-theme=orange]{--bg:#140c05;--panel:#241608;}
+html[data-theme=green]{--bg:#05120c;--panel:#082016;}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:var(--bg);color:var(--text);
+  font-family:'Segoe UI',system-ui,-apple-system,'Noto Sans Arabic',sans-serif;
+  display:flex;flex-direction:column;overflow:hidden;overscroll-behavior:none;
+  -webkit-text-size-adjust:100%;
+}
+
+/* ---------- header ---------- */
+.vhead{
+  flex:0 0 auto;display:flex;align-items:center;gap:8px;padding:8px 10px;
+  background:var(--panel);border-bottom:1px solid var(--border);
+}
+.vbtn{
+  display:inline-flex;align-items:center;justify-content:center;gap:7px;
+  padding:7px 11px;border:1px solid var(--border2);border-radius:9px;
+  background:var(--panel2);color:var(--text2);font-size:12.5px;font-weight:700;
+  font-family:inherit;cursor:pointer;white-space:nowrap;transition:all .15s;
+}
+.vbtn:hover{border-color:var(--blue);color:var(--text)}
+.vbtn.icon{padding:7px 9px;min-width:34px}
+.vbtn.icon svg{width:17px;height:17px;stroke:currentColor;fill:none;stroke-width:1.9;
+  stroke-linecap:round;stroke-linejoin:round;display:block}
+.vbtn.primary{background:linear-gradient(135deg,var(--blue),var(--blue2));border-color:transparent;color:#fff}
+.vbtn[disabled]{opacity:.4;pointer-events:none}
+.vbtn.on{background:var(--sel);border-color:rgba(59,130,246,.55);color:var(--text)}
+.vname{font-size:13.5px;font-weight:800;direction:ltr;min-width:0;max-width:34vw;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vmeta{color:var(--text3);font-size:11.5px;white-space:nowrap;direction:ltr}
+.vstat{color:var(--text3);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:26vw}
+.vsep{width:1px;height:22px;background:var(--border);flex:0 0 auto}
+.spacer{flex:1}
+.vsel{
+  background:var(--panel2);border:1px solid var(--border2);border-radius:8px;color:var(--text);
+  font-family:inherit;font-size:12.5px;padding:6px 8px;outline:none;direction:ltr;
+}
+.vsel:focus{border-color:var(--blue)}
+
+/* ---------- body ---------- */
+.vmain{flex:1 1 auto;display:flex;min-height:0}
+.vside{
+  flex:0 0 auto;width:190px;background:var(--panel);border-left:1px solid var(--border);
+  overflow-y:auto;padding:8px;display:none;
+}
+.vmain.side .vside{display:block}
+.vside .t{font-size:11.5px;color:var(--text3);padding:4px 6px 8px;direction:rtl}
+.thumb{
+  position:relative;margin:0 0 10px;cursor:pointer;border-radius:8px;overflow:hidden;
+  border:2px solid transparent;background:var(--panel2);
+}
+.thumb.on{border-color:var(--blue)}
+.thumb canvas,.thumb .ph{display:block;width:100%;height:auto;background:#fff}
+.thumb .n{
+  position:absolute;bottom:4px;left:5px;font-size:10.5px;font-weight:800;color:#fff;
+  background:rgba(0,0,0,.65);border-radius:6px;padding:1px 6px;direction:ltr;
+}
+.vpages{flex:1 1 auto;overflow:auto;position:relative;background:var(--page-bg);
+  scroll-behavior:auto;overscroll-behavior:contain}
+.vpad{display:flex;flex-direction:column;align-items:center;gap:14px;padding:16px 12px 40px}
+.pslot{position:relative;background:#fff;box-shadow:0 10px 34px var(--page-shadow);border-radius:3px}
+.pslot canvas{display:block;border-radius:3px}
+.pslot .no{
+  position:absolute;bottom:-11px;left:50%;transform:translateX(-50%);
+  font-size:10.5px;color:var(--text2);background:rgba(0,0,0,.35);
+  padding:1px 7px;border-radius:6px;direction:ltr;pointer-events:none;
+}
+.pslot.cur{outline:2px solid var(--blue);outline-offset:3px}
+.plate{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;
+  color:var(--text2);font-size:13.5px;padding:60px 20px;text-align:center;
+}
+.spin{width:34px;height:34px;border-radius:50%;border:3px solid var(--border2);
+  border-top-color:var(--blue);animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.vempty{
+  position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  padding:24px;text-align:center;
+}
+.vempty .card{
+  width:min(420px,100%);background:var(--panel);border:1px solid var(--border);
+  border-radius:20px;padding:28px 22px;box-shadow:0 22px 60px rgba(0,0,0,.45);
+}
+.vempty h2{font-size:16px;font-weight:800;margin-bottom:8px}
+.vempty p{font-size:13px;color:var(--text3);line-height:1.95;margin-bottom:16px}
+
+/* ---------- find bar ---------- */
+.vfind{
+  position:absolute;z-index:20;top:12px;left:50%;transform:translateX(-50%);
+  display:flex;align-items:center;gap:6px;padding:8px 10px;border-radius:12px;
+  background:var(--panel);border:1px solid var(--border2);box-shadow:0 14px 36px rgba(0,0,0,.5);
+  max-width:calc(100% - 24px);flex-wrap:wrap;
+}
+.vfind[hidden]{display:none}
+.vfind input{
+  background:var(--panel2);border:1px solid var(--border2);border-radius:8px;color:var(--text);
+  padding:7px 10px;font-size:13px;font-family:inherit;min-width:150px;outline:none;
+}
+.vfind input:focus{border-color:var(--blue)}
+.vfind .cnt{font-size:12px;color:var(--text3);white-space:nowrap}
+mark.hit{background:rgba(250,204,21,.55);color:#111;border-radius:2px}
+mark.cur{background:rgba(249,115,22,.75);color:#111}
+
+/* ---------- footer ---------- */
+.vfoot{
+  flex:0 0 auto;display:flex;align-items:center;gap:12px;padding:5px 12px;
+  background:var(--panel);border-top:1px solid var(--border);
+  font-size:11.5px;color:var(--text3);
+}
+.vfoot .lbl{direction:rtl}
+
+@media (max-width:860px){
+  .vname{max-width:24vw}
+  .vstat,.vmeta{display:none}
+  .vside{width:132px}
+}
+@media (max-width:640px){
+  .vhead{gap:6px;padding:7px 8px;flex-wrap:wrap}
+  .vside{display:none!important}
+  .vname{max-width:38vw}
+}
+@media print{
+  .vhead,.vside,.vfoot,.vfind{display:none!important}
+  body,html{height:auto;overflow:visible}
+  .vmain,.vpages{display:block;overflow:visible;background:#fff}
+  .vpad{padding:0;gap:0}
+  .pslot{box-shadow:none;page-break-after:always;break-after:page;margin:0}
+  .pslot .no{display:none}
+}
+</style>
+</head>
+<body>
+
+<header class="vhead">
+  <button class="vbtn" type="button" id="backBtn" title="بازگشت">&#8592; بازگشت</button>
+  <span class="vname" dir="ltr" id="vname">__NAME__</span>
+  <span class="vmeta" id="vmeta">__SIZE__</span>
+  <span class="vstat" id="vstat"></span>
+  <span class="spacer"></span>
+
+  <span class="vsep"></span>
+  <button class="vbtn icon" type="button" id="sideBtn" title="فهرست صفحه‌ها">
+    <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+  </button>
+  <button class="vbtn icon" type="button" id="findBtn" title="جست‌وجو (Ctrl+F)">
+    <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+  </button>
+
+  <span class="vsep"></span>
+  <button class="vbtn icon" type="button" id="pagePrev" title="صفحه قبل (PageUp)">
+    <svg viewBox="0 0 24 24"><path d="m15 5-7 7 7 7"/></svg>
+  </button>
+  <input class="vsel" id="pageInput" type="number" min="1" value="1" title="شماره صفحه" style="width:66px">
+  <span style="font-size:12px;color:var(--text3)">از <b id="pageCount">?</b></span>
+  <button class="vbtn icon" type="button" id="pageNext" title="صفحه بعد (PageDown)">
+    <svg viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></svg>
+  </button>
+
+  <span class="vsep"></span>
+  <button class="vbtn icon" type="button" id="zoomOut" title="کوچک‌نمایی (Ctrl+-)">
+    <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M8 11h6M20 20l-3.5-3.5"/></svg>
+  </button>
+  <select class="vsel" id="zoomSel" title="بزرگ‌نمایی">
+    <option value="fit-page">متناسب صفحه</option>
+    <option value="fit-width">متناسب عرض</option>
+    <option value="0.5">50%</option>
+    <option value="0.75">75%</option>
+    <option value="1">100%</option>
+    <option value="1.25">125%</option>
+    <option value="1.5">150%</option>
+    <option value="2">200%</option>
+    <option value="3">300%</option>
+  </select>
+  <button class="vbtn icon" type="button" id="zoomIn" title="بزرگ‌نمایی (Ctrl+=)">
+    <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M8 11h6M11 8v6M20 20l-3.5-3.5"/></svg>
+  </button>
+  <button class="vbtn icon" type="button" id="rotL" title="چرخش به چپ">
+    <svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>
+  </button>
+  <button class="vbtn icon" type="button" id="rotR" title="چرخش به راست">
+    <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>
+  </button>
+
+  <span class="vsep"></span>
+  <button class="vbtn icon" type="button" id="printBtn" title="چاپ">
+    <svg viewBox="0 0 24 24"><path d="M6 9V3h12v6"/><rect x="3" y="9" width="18" height="8" rx="2"/><path d="M6 17h12v4H6z"/></svg>
+  </button>
+  <button class="vbtn icon" type="button" id="fsBtn" title="تمام‌صفحه">
+    <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 15v5h-5M15 4h5v5M9 20H4v-5"/></svg>
+  </button>
+  <a class="vbtn primary" id="dlBtn" href="__DL__" download>
+    <svg viewBox="0 0 24 24" style="width:17px;height:17px;stroke:#fff;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round"><path d="M12 3v12"/><path d="m7 11 5 5 5-5"/><path d="M5 21h14"/></svg>
+    دانلود
+  </a>
+</header>
+
+<div class="vmain" id="vmain">
+  <aside class="vside" id="vside">
+    <div class="t">فهرست صفحه‌ها</div>
+    <div id="thumbBox"></div>
+  </aside>
+
+  <div class="vpages" id="vpages">
+    <div class="vfind" id="vfind" hidden>
+      <input id="findInput" placeholder="جست‌وجو در سند" autocomplete="off" spellcheck="false">
+      <span class="cnt" id="findCount"></span>
+      <button class="vbtn icon" type="button" id="findPrev" title="قبلی">&#8249;</button>
+      <button class="vbtn icon" type="button" id="findNext" title="بعدی">&#8250;</button>
+      <button class="vbtn" type="button" id="findAll">همه</button>
+      <button class="vbtn" type="button" id="findClose">بستن</button>
+    </div>
+    <div class="vpad" id="vpad">
+      <div class="plate"><div class="spin"></div><span id="loadMsg">در حال باز کردن سند...</span></div>
+    </div>
+  </div>
+</div>
+
+<footer class="vfoot">
+  <span class="lbl" id="footLeft">&#8212;</span>
+  <span class="spacer"></span>
+  <span class="lbl" id="footRight">نمایشگر سند</span>
+</footer>
+
+<script src="/static/vendor/pdf.min.js"></script>
+<script>
+"use strict";
+/* =====================================================================
+   Document viewer: renders PDFs in the site theme with a page sidebar,
+   zoom / fit modes, rotation, search and print. Non-PDF documents fall
+   back to the browser's own viewer inside the same shell.
+   ===================================================================== */
+var NAME = __JSON_NAME__;
+var SRC  = "__SRC__";
+var DL   = "__DL__";
+var VENDOR_V = "__VENDOR_V__";
+var $ = function(id){ return document.getElementById(id); };
+
+var doc = null, pageCount = 0, pageNum = 1, rotation = 0;
+var zoomMode = "fit-width", zoomValue = 1, fitScale = 1;
+var renderToken = 0, findHits = [], findIdx = -1, findTerm = "";
+var pages = [];            /* {slot, canvas, wrap, rendered:{w,h,scale,rot}} */
+
+function setStatus(msg, cls){
+  var el = $("vstat");
+  el.textContent = msg || "";
+  el.style.color = cls === "err" ? "var(--red)" : cls === "ok" ? "var(--green)" : "";
+}
+
+/* ---------- layout ---------- */
+function viewWidth(){
+  return $("vpages").clientWidth - 26;
+}
+function viewHeight(){
+  return $("vpages").clientHeight - 26;
+}
+function fitFor(page){
+  var vp = page.getViewport({scale: 1, rotation: rotation});
+  if (zoomMode === "fit-width") return viewWidth() / vp.width;
+  if (zoomMode === "fit-page") return Math.min(viewWidth() / vp.width, viewHeight() / vp.height);
+  return zoomValue;
+}
+function clampScale(s){
+  return Math.max(0.1, Math.min(6, s));
+}
+
+/* ---------- rendering ---------- */
+function buildSlots(){
+  var pad = $("vpad");
+  pad.innerHTML = "";
+  pages = [];
+  for (var i = 1; i <= pageCount; i++){
+    var slot = document.createElement("div");
+    slot.className = "pslot";
+    slot.dataset.page = String(i);
+    var canvas = document.createElement("canvas");
+    var no = document.createElement("span");
+    no.className = "no";
+    no.textContent = i;
+    slot.appendChild(canvas);
+    slot.appendChild(no);
+    pad.appendChild(slot);
+    pages.push({slot: slot, canvas: canvas, no: no, rendered: null});
+  }
+}
+/* pdf.js returns a render task; 3.x exposes the promise on .promise while
+   other builds return something thenable directly */
+function renderPromise(task){
+  if (task && typeof task.then === "function") return task;
+  if (task && task.promise) return task.promise;
+  return Promise.resolve();
+}
+function renderPage(slot, page, scale, force){
+  var pr = slot.rendered;
+  if (!force && pr && Math.abs(pr.scale - scale) < 0.004 && pr.rot === rotation) return Promise.resolve();
+  /* pdf.js refuses two render tasks on one canvas: a scroll and a resize can
+     ask for the same page at the same time, so the older task is cancelled */
+  if (slot.task){
+    try { slot.task.cancel(); } catch(e){}
+    slot.task = null;
+  }
+  /* getViewport() is synchronous in pdf.js - only render() is a task */
+  var vp = page.getViewport({scale: scale, rotation: rotation});
+  var task = page.render({canvasContext: slot.canvas.getContext("2d"),
+                          viewport: vp, intent: "display"});
+  slot.task = task;
+  return renderPromise(task).then(function(){
+    if (slot.task !== task) return;
+    slot.task = null;
+    slot.canvas.width = Math.max(1, Math.floor(vp.width * (window.devicePixelRatio || 1)));
+    slot.canvas.height = Math.max(1, Math.floor(vp.height * (window.devicePixelRatio || 1)));
+    slot.canvas.style.width = Math.floor(vp.width) + "px";
+    slot.canvas.style.height = Math.floor(vp.height) + "px";
+    slot.slot.style.width = Math.floor(vp.width) + "px";
+    slot.slot.style.height = Math.floor(vp.height) + "px";
+    slot.rendered = {scale: scale, rot: rotation, w: vp.width, h: vp.height};
+    markCurrent();
+  }).catch(function(err){
+    if (slot.task === task) slot.task = null;
+    /* a cancelled task rejects on purpose - that is not worth reporting */
+    if (err && err.name === "RenderingCancelledException") return;
+    throw err;
+  });
+}
+function layout(force){
+  if (!doc) return Promise.resolve();
+  var jobs = [];
+  for (var i = 0; i < pageCount; i++){
+    /* the index is captured per iteration: the callbacks run long after the
+       loop variable has moved on */
+    (function(idx){
+      jobs.push(doc.getPage(idx + 1).then(function(page){
+        return renderPage(pages[idx], page, clampScale(fitFor(page)), force);
+      }).catch(function(err){
+        console.error("page render failed", idx + 1, err);
+      }));
+    })(i);
+  }
+  return Promise.all(jobs);
+}
+function visibleRange(){
+  var top = $("vpages").scrollTop, bot = top + $("vpages").clientHeight;
+  var out = [];
+  for (var i = 0; i < pages.length; i++){
+    var el = pages[i].slot;
+    if (el.offsetTop + el.offsetHeight > top - 200 && el.offsetTop < bot + 200) out.push(i);
+  }
+  return out;
+}
+function renderVisible(){
+  if (!doc) return;
+  visibleRange().forEach(function(i){
+    doc.getPage(i + 1).then(function(page){
+      return renderPage(pages[i], page, clampScale(fitFor(page)), false);
+    }).catch(function(){});
+  });
+}
+var scrollTimer = null;
+$("vpages").addEventListener("scroll", function(){
+  if (scrollTimer) clearTimeout(scrollTimer);
+  scrollTimer = setTimeout(function(){ renderVisible(); onScroll(); }, 90);
+}, {passive: true});
+function onScroll(){
+  if (!pageCount) return;
+  var mid = $("vpages").scrollTop + $("vpages").clientHeight / 2;
+  var cur = 1;
+  for (var i = 0; i < pages.length; i++){
+    var el = pages[i].slot;
+    /* the page under the middle of the view wins - comparing to the page
+       centres instead would report the page above when the top is aligned */
+    if (mid < el.offsetTop + el.offsetHeight){ cur = i + 1; break; }
+  }
+  setPage(cur, true, true);
+}
+function markCurrent(){
+  for (var i = 0; i < pages.length; i++){
+    pages[i].slot.classList.toggle("cur", i + 1 === pageNum);
+  }
+}
+function setPage(n, quiet, keepPos){
+  n = Math.max(1, Math.min(pageCount || 1, n));
+  var changed = n !== pageNum;
+  pageNum = n;
+  $("pageInput").value = String(n);
+  markCurrent();
+  var th = pages[n - 1];
+  /* keepPos is used by the scroll handler: the user already moved the view,
+     moving it again would only start a new scroll event */
+  if (th && !keepPos) th.slot.scrollIntoView({block: "start", behavior: changed && !quiet ? "smooth" : "auto"});
+  Array.prototype.forEach.call($("thumbBox").children, function(el, i){
+    el.classList.toggle("on", i + 1 === n);
+  });
+  $("pagePrev").disabled = n <= 1;
+  $("pageNext").disabled = n >= pageCount;
+  $("footLeft").textContent = "صفحه " + n + " از " + pageCount;
+  updateFindPos();
+}
+
+/* ---------- sidebar thumbnails ---------- */
+function buildThumbs(){
+  var box = $("thumbBox");
+  box.innerHTML = "";
+  if (pageCount > 140){                     /* keep the sidebar light on huge files */
+    $("vside").innerHTML = '<div class="t">فهرست صفحه‌ها برای این سند نمایش داده نمی‌شود</div>';
+    return;
+  }
+  for (var i = 1; i <= pageCount; i++){
+    (function(i){
+      var t = document.createElement("div");
+      t.className = "thumb";
+      var ph = document.createElement("div");
+      ph.className = "ph";
+      ph.style.aspectRatio = "1 / 1.414";
+      var n = document.createElement("span");
+      n.className = "n";
+      n.textContent = i;
+      t.appendChild(ph);
+      t.appendChild(n);
+      t.addEventListener("click", function(){ setPage(i); });
+      box.appendChild(t);
+      doc.getPage(i).then(function(page){
+        var vp = page.getViewport({scale: 0.18, rotation: rotation});
+        var c = document.createElement("canvas");
+        c.width = Math.max(1, Math.floor(vp.width));
+        c.height = Math.max(1, Math.floor(vp.height));
+        renderPromise(page.render({canvasContext: c.getContext("2d"), viewport: vp})).then(function(){
+          ph.replaceWith(c);
+        }).catch(function(){});
+      }).catch(function(){});
+    })(i);
+  }
+}
+
+/* ---------- search over the text layer ---------- */
+function pageTextItems(p){
+  if (p._textItems) return Promise.resolve(p._textItems);
+  return p.getTextContent().then(function(tc){
+    p._textItems = tc.items.filter(function(it){ return it.str && it.str.trim(); });
+    return p._textItems;
+  }).catch(function(){ p._textItems = []; return []; });
+}
+function runFind(term, jumpTo){
+  findTerm = term;
+  findHits = [];
+  findIdx = -1;
+  if (!term){ updateFindPos(); return Promise.resolve(); }
+  var low = term.toLowerCase();
+  var chain = Promise.resolve();
+  for (var i = 0; i < pageCount; i++){
+    (function(i){
+      chain = chain.then(function(){
+        return doc.getPage(i + 1).then(pageTextItems).then(function(items){
+          items.forEach(function(it){
+            var s = it.str;
+            var ls = s.toLowerCase();
+            var at = ls.indexOf(low);
+            while (at >= 0){
+              findHits.push({page: i + 1, item: it, start: at});
+              at = ls.indexOf(low, at + term.length);
+            }
+          });
+        }).catch(function(){});
+      });
+    })(i);
+  }
+  return chain.then(function(){
+    $("findCount").textContent = findHits.length ? findHits.length + " مورد" : "موردی یافت نشد";
+    if (jumpTo && findHits.length){
+      findIdx = 0;
+      gotoHit();
+    } else if (!findHits.length) {
+      setStatus("نتیجه‌ای یافت نشد", "err");
+    }
+  });
+}
+function gotoHit(){
+  if (!findHits.length) return;
+  var hit = findHits[((findIdx % findHits.length) + findHits.length) % findHits.length];
+  /* jump without the smooth animation: the scroll handler would sample a
+     half-finished animation and put the page counter back where it started */
+  setPage(hit.page, true);
+  var p = pages[hit.page - 1];
+  if (!p || !p.rendered) return;
+  doc.getPage(hit.page).then(function(page){
+    if (!p.rendered) return;
+    var x = hit.item.transform[4] * p.rendered.scale + (hit.item.width || 0) * p.rendered.scale / 2;
+    var y = hit.item.transform[5] * p.rendered.scale;
+    $("vpages").scrollTop = Math.max(0, p.slot.offsetTop + y - $("vpages").clientHeight / 2);
+    if (p.rendered.w) $("vpages").scrollLeft = Math.max(0, p.slot.offsetLeft + x - $("vpages").clientWidth / 2);
+    setPage(hit.page, true);
+  }).catch(function(){});
+  updateFindPos();
+}
+function updateFindPos(){
+  if (!findTerm) return;
+  $("findCount").textContent = findHits.length
+    ? (findIdx + 1) + " از " + findHits.length : "موردی یافت نشد";
+}
+function clearMarks(){
+  pages.forEach(function(p){ p._marked = false; });
+  applyZoom(true);
+}
+function markHit(hit){
+  var p = pages[hit.page - 1];
+  if (!p || !p.rendered) return;
+  var scale = p.rendered.scale, dpr = window.devicePixelRatio || 1;
+  var ctx = p.canvas.getContext("2d");
+  var tx = hit.item.transform;
+  var w = (hit.item.width || 0) * scale * dpr;
+  var h = (hit.item.height || 0) * scale * dpr;
+  var x = tx[4] * scale * dpr;
+  var y = tx[5] * scale * dpr;
+  ctx.save();
+  ctx.strokeStyle = "rgba(249,115,22,.95)";
+  ctx.lineWidth = Math.max(1.5, 2 * dpr);
+  ctx.strokeRect(x - 1, y - h + 1, w + 2, h + 2);
+  ctx.restore();
+}
+
+/* ---------- controls ---------- */
+function applyZoom(force){
+  if (!doc) return;
+  layout(force).then(function(){
+    setPage(pageNum, true);
+    renderVisible();
+  });
+}
+$("zoomIn").addEventListener("click", function(){
+  var cur = zoomMode === "fit-width" || zoomMode === "fit-page" ? fitScaleOfCurrent() : zoomValue;
+  zoomMode = ""; zoomValue = clampScale(cur * 1.25); syncZoomSel();
+  applyZoom(true);
+});
+$("zoomOut").addEventListener("click", function(){
+  var cur = zoomMode === "fit-width" || zoomMode === "fit-page" ? fitScaleOfCurrent() : zoomValue;
+  zoomMode = ""; zoomValue = clampScale(cur / 1.25); syncZoomSel();
+  applyZoom(true);
+});
+function fitScaleOfCurrent(){
+  if (!doc) return 1;
+  var p = pages[pageNum - 1];
+  if (p && p.rendered) return p.rendered.scale;
+  return fitScale || 1;
+}
+function syncZoomSel(){
+  var sel = $("zoomSel");
+  var found = false;
+  Array.prototype.forEach.call(sel.options, function(o){ if (o.value === zoomMode) found = true; });
+  if (found) sel.value = zoomMode;
+  else {
+    var opt = document.createElement("option");
+    opt.value = String(Math.round(zoomValue * 100)) + "%";
+    opt.textContent = opt.value;
+    sel.appendChild(opt);
+    sel.value = opt.value;
+  }
+}
+$("zoomSel").addEventListener("change", function(){
+  var v = this.value;
+  if (v === "fit-width" || v === "fit-page"){ zoomMode = v; applyZoom(true); return; }
+  zoomMode = "";
+  zoomValue = clampScale(parseFloat(v) || 1);
+  applyZoom(true);
+});
+$("rotL").addEventListener("click", function(){ rotation = (rotation + 270) % 360; applyZoom(true); });
+$("rotR").addEventListener("click", function(){ rotation = (rotation + 90) % 360; applyZoom(true); });
+$("pagePrev").addEventListener("click", function(){ setPage(pageNum - 1); });
+$("pageNext").addEventListener("click", function(){ setPage(pageNum + 1); });
+$("pageInput").addEventListener("change", function(){ setPage(parseInt(this.value, 10) || 1); });
+$("sideBtn").addEventListener("click", function(){
+  $("vmain").classList.toggle("side");
+  this.classList.toggle("on", $("vmain").classList.contains("side"));
+  applyZoom(true);
+});
+$("printBtn").addEventListener("click", function(){ window.print(); });
+$("backBtn").addEventListener("click", function(){
+  try { window.close(); } catch(e){}
+  setTimeout(function(){
+    try { if (!window.closed) history.back(); }
+    catch(e2){ location.href = location.pathname.replace(/[^/]*\/$/, "") || "/"; }
+  }, 80);
+});
+$("findBtn").addEventListener("click", function(){
+  var f = $("vfind");
+  f.hidden = !f.hidden;
+  this.classList.toggle("on", !f.hidden);
+  if (!f.hidden) $("findInput").focus();
+});
+$("findClose").addEventListener("click", function(){
+  $("vfind").hidden = true;
+  $("findBtn").classList.remove("on");
+  findTerm = ""; findHits = []; findIdx = -1; $("findCount").textContent = "";
+  clearMarks();
+  applyZoom(true);
+});
+$("findInput").addEventListener("input", function(){
+  var v = this.value.trim();
+  if (!v){ clearMarks(); $("findCount").textContent = ""; return; }
+  runFind(v, true);
+});
+$("findInput").addEventListener("keydown", function(e){
+  if (e.key === "Enter"){ e.preventDefault(); stepFind(e.shiftKey ? -1 : 1); }
+  if (e.key === "Escape"){ $("findClose").click(); }
+});
+$("findNext").addEventListener("click", function(){ stepFind(1); });
+$("findPrev").addEventListener("click", function(){ stepFind(-1); });
+$("findAll").addEventListener("click", function(){
+  if (findHits.length){
+    findIdx = -1;
+    for (var i = 0; i < findHits.length; i++){
+      markHit(findHits[i]);
+      setPage(findHits[i].page);
+    }
+    setPage(findHits[0].page);
+    setStatus(findHits.length + " مورد علامت خورد", "ok");
+  }
+});
+function stepFind(dir){
+  if (!findHits.length) return;
+  findIdx = (findIdx + dir + findHits.length) % findHits.length;
+  gotoHit();
+  markHit(findHits[findIdx]);
+}
+document.addEventListener("keydown", function(e){
+  var tag = (e.target && e.target.tagName) || "";
+  if (tag === "INPUT" && e.target.type === "number" && e.key !== "Escape") return;
+  var mod = e.ctrlKey || e.metaKey;
+  if (mod && (e.key === "+" || e.key === "=")){ e.preventDefault(); $("zoomIn").click(); return; }
+  if (mod && e.key === "-"){ e.preventDefault(); $("zoomOut").click(); return; }
+  if (mod && e.key === "0"){ e.preventDefault(); zoomMode = "fit-width"; syncZoomSel(); applyZoom(true); return; }
+  if (mod && e.key.toLowerCase() === "f"){ e.preventDefault(); $("vfind").hidden = false;
+    $("findBtn").classList.add("on"); $("findInput").focus(); return; }
+  if (e.key === "PageDown"){ e.preventDefault(); setPage(pageNum + 1); }
+  else if (e.key === "PageUp"){ e.preventDefault(); setPage(pageNum - 1); }
+  else if (e.key === "Home"){ e.preventDefault(); setPage(1); }
+  else if (e.key === "End"){ e.preventDefault(); setPage(pageCount); }
+  else if (e.key === "Escape" && !$("vfind").hidden){ $("findClose").click(); }
+});
+document.addEventListener("fullscreenchange", function(){
+  $("fsBtn").classList.toggle("on", !!document.fullscreenElement);
+});
+$("fsBtn").addEventListener("click", function(){
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen && document.documentElement.requestFullscreen();
+});
+window.addEventListener("resize", function(){
+  if (doc) applyZoom(false);
+});
+
+/* ---------- boot ---------- */
+function fallbackNotice(title, text){
+  var wrap = $("vpages");
+  wrap.innerHTML = '<div class="vempty"><div class="card"><h2>' + title + "</h2><p>" + text +
+    '</p><a class="vbtn primary" href="' + DL + '">دانلود فایل</a></div></div>';
+}
+function isPdf(){
+  return /\.pdf$/i.test(NAME) || /\.pdf$/i.test(SRC);
+}
+function start(){
+  $("dlBtn").setAttribute("download", NAME);
+  $("dlBtn").setAttribute("href", DL);
+  if (!isPdf()){
+    /* not a PDF: hand it to the browser inside the same shell */
+    fallbackNotice("این فرمت نمایش داده نمی‌شود",
+      "این فایل از نمایشگر داخلی پشتیبانی نمی‌کند؛ می‌توانید آن را دانلود کنید و با برنامه مربوطه باز کنید.");
+    setStatus("");
+    $("vfind").hidden = true;
+    return Promise.resolve();
+  }
+  if (typeof pdfjsLib === "undefined"){
+    setStatus("کتابخانهٔ نمایش بارگذاری نشد", "err");
+    return Promise.resolve();
+  }
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/vendor/pdf.worker.min.js?v=" + VENDOR_V;
+  setStatus("در حال خواندن سند...");
+  return fetch(SRC + (SRC.indexOf("?") >= 0 ? "&" : "?") + "proxy=1", {credentials: "same-origin"})
+    .then(function(r){
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.arrayBuffer();
+    })
+    .then(function(buf){
+      return pdfjsLib.getDocument({data: new Uint8Array(buf)}).promise;
+    })
+    .then(function(d){
+      doc = d;
+      pageCount = d.numPages;
+      $("pageCount").textContent = String(pageCount);
+      $("pageInput").max = String(pageCount);
+      $("vmeta").textContent = $("vmeta").textContent + " · " + pageCount + " صفحه";
+      buildSlots();
+      setStatus("در حال ترسیم صفحه‌ها...");
+      return doc.getPage(1).then(function(page){
+        zoomMode = "fit-width";
+        fitScale = fitFor(page);
+        return renderPage(pages[0], page, clampScale(fitFor(page)), true);
+      }).then(function(){
+        setPage(1);
+        setStatus("");
+        buildThumbs();
+        renderVisible();
+        return layout(false);
+      });
+    })
+    .catch(function(err){
+      setStatus("باز کردن سند ممکن نشد", "err");
+      $("vpad").innerHTML = '<div class="plate"><div style="font-size:30px">&#128196;</div>' +
+        "<span>" + String((err && err.message) || err) +
+        '</span><button class="vbtn primary" type="button" onclick="location.reload()">تلاش دوباره</button></div>';
+    });
+}
+start();
+</script>
+</body>
+</html>
