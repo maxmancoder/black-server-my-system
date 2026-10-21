@@ -62,6 +62,39 @@ Cloudflare Quick Tunnel / SSH Fallback  (cloudflared / localhost.run / serveo)
 
 `Ctrl+C` را در پنجره ترمینال فشار دهید.
 
+### ذخیره‌سازی روی Neon (دیتابیس ابری)
+
+به‌جای دیسک محلی، می‌شود فایل‌ها را روی [Neon](https://neon.com) نگه داشت:
+بایت‌های فایل در **Object Storage** و مشخصات (نام، سایز، تاریخ، مالک) در **Postgres**.
+در این حالت هر آپلود، هر ویرایش، هر ساخت فایل یا پوشه و هر حذف، مستقیم در Neon ذخیره
+می‌شود و سایت در هر بار اجرا فایل‌ها را از همان‌جا می‌خواند.
+
+**۱) در پنل Neon بسازید:**
+- یک **Storage bucket** (مثلاً با نام `files`) و کلید دسترسی آن
+- رشتهٔ اتصال **Postgres** (از بخش Connection، با `?sslmode=require`)
+
+**۲) در فایل `.env` کنار `server.py` پر کنید:**
+```
+AWS_ENDPOINT_URL_S3=https://<account>.storage.neon.tech
+AWS_REGION=us-east-2
+AWS_ACCESS_KEY_ID=<key>
+AWS_SECRET_ACCESS_KEY=<secret>
+BUCKET_NAME=files
+DATABASE_URL=postgresql://<user>:<password>@<host>/<db>?sslmode=require
+BS_STORAGE=neon
+```
+`BS_STORAGE=neon` یعنی سرور **هرگز** به دیسک محلی برنگردد؛ اگر پیکربندی ناقص باشد
+اصلاً بالا نمی‌آید. (بدون این خط، حالت `auto` است: تا وقتی کامل پر نشود، سایت روی دیسک محلی کار می‌کند.)
+
+**۳) بررسی اتصال و انتقال فایلهای موجود:**
+```
+python server.py --check-storage      # تست bucket و دیتابیس
+python server.py --migrate-dry-run    # نمایش فایلهایی که منتقل می‌شوند
+python server.py --migrate            # انتقال پوشه downloads به Neon
+```
+`--migrate` فایلها را در Neon کپی می‌کند و از پوشهٔ محلی **پاک نمی‌کند**، پس اگر
+اشتباهی شد چیزی از دست نمی‌رود. بعد از آن سایت فقط از Neon می‌خواند.
+
 ### گزینه‌های خط فرمان
 
 | گزینه | توضیح |
@@ -74,6 +107,9 @@ Cloudflare Quick Tunnel / SSH Fallback  (cloudflared / localhost.run / serveo)
 | `--protocol P` | پروتکل تونل: `auto`، `quic` یا `http2` |
 | `--no-ssh-fallback` | غیرفعال کردن SSH fallback |
 | `--ssh-timeout N` | ثانیه انتظار برای SSH fallback (پیش‌فرض 45) |
+| `--check-storage` | بررسی اتصال Neon (bucket و دیتابیس) و خروج |
+| `--migrate` | انتقال فایلهای پوشه `downloads` به Neon و خروج |
+| `--migrate-dry-run` | فقط نشان می‌دهد چه چیزی منتقل می‌شود |
 | `--verbose` | نمایش لاگهای دیباگ |
 
 مثال:
@@ -189,7 +225,47 @@ start_server.bat --no-browser
 | `--protocol P`           | cloudflared transport: `auto`, `quic` or `http2`   |
 | `--no-ssh-fallback`      | Disable the automatic SSH fallback tunnel          |
 | `--ssh-timeout N`        | Seconds to wait for the SSH fallback (default 45)  |
+| `--check-storage`        | Check the Neon bucket and database, then exit      |
+| `--migrate`              | Copy the files in `downloads` into Neon, then exit |
+| `--migrate-dry-run`      | Show what `--migrate` would copy, write nothing    |
 | `--verbose`              | Print debug logs to the console                    |
+
+### Storing the files on Neon
+
+Instead of the local disk the site can keep everything in
+[Neon](https://neon.com): the file bytes in **Object Storage**, the metadata
+(name, size, date, owner) in **Postgres**. Every upload, edit, new file, new
+folder and delete is then written straight to Neon, and the site reads the
+file list from there on every start.
+
+1. In the Neon console create a **storage bucket** (e.g. `files`) and an
+   access key, and copy the **Postgres connection string**.
+2. Fill in `.env` next to `server.py`:
+
+   ```
+   AWS_ENDPOINT_URL_S3=https://<account>.storage.neon.tech
+   AWS_REGION=us-east-2
+   AWS_ACCESS_KEY_ID=<key>
+   AWS_SECRET_ACCESS_KEY=<secret>
+   BUCKET_NAME=files
+   DATABASE_URL=postgresql://<user>:<password>@<host>/<db>?sslmode=require
+   BS_STORAGE=neon
+   ```
+
+   `BS_STORAGE=neon` means the server never falls back to the local disk —
+   with an incomplete configuration it refuses to start. Without that line
+   the default is `auto`: the site uses Neon once it is fully configured and
+   the local disk until then.
+3. Check the setup and move the files that are already on disk:
+
+   ```
+   python server.py --check-storage
+   python server.py --migrate-dry-run
+   python server.py --migrate
+   ```
+
+   `--migrate` copies the files into Neon and leaves the local folder alone,
+   so nothing is lost if it was run by accident.
 
 ### Troubleshooting
 

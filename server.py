@@ -283,6 +283,156 @@ def storage_active() -> bool:
     except Exception:  # noqa: BLE001
         return False
 
+
+def check_storage_setup() -> int:
+    """Report whether Neon is configured and reachable, then exit.
+
+    Prints what is missing (bucket name, connection string), and when the
+    configuration is complete it pings both the object storage and the
+    database so a broken credential is found before the site goes live.
+    """
+    log = logging.getLogger("public-download-server")
+    if neon is None:
+        print("[ERROR] The Neon storage module could not be imported.")
+        return 1
+    neon.load_dotenv()
+    endpoint = neon._setting("AWS_ENDPOINT_URL_S3", "AWS_ENDPOINT_URL")
+    region = neon._setting("AWS_REGION", "AWS_DEFAULT_REGION")
+    bucket = neon._setting("BUCKET_NAME")
+    database_url = neon._setting("DATABASE_URL")
+    forced = neon._setting("BS_STORAGE").lower()
+
+    print("Neon storage check")
+    print("-------------------")
+    print(f"  endpoint     : {endpoint or '(not set)'}")
+    print(f"  region       : {region or '(not set)'}")
+    print(f"  bucket       : {bucket or '(not set)'}")
+    print(f"  database     : {'(not set)' if not database_url else database_url.split('@')[-1]}")
+    print(f"  mode         : {forced or 'auto'}")
+
+    missing = [
+        name for name, value in (
+            ("AWS_ENDPOINT_URL_S3", endpoint),
+            ("AWS_REGION", region),
+            ("BUCKET_NAME", bucket),
+            ("DATABASE_URL", database_url),
+        ) if not value
+    ]
+    if missing:
+        print("")
+        print("[ERROR] Missing in .env: " + ", ".join(missing))
+        print("        The site is running on the local disk meanwhile.")
+        print("        BUCKET_NAME  : the name of the bucket you created in Neon")
+        print("        DATABASE_URL : the Postgres connection string from the Neon console")
+        return 1
+
+    try:
+        store = storage()
+    except Exception as exc:  # noqa: BLE001
+        print("")
+        print(f"[ERROR] Neon storage could not be opened: {exc}")
+        return 1
+    if store is None:
+        print("")
+        print("[ERROR] Neon is not active - the site would use the local disk.")
+        print("        Set BS_STORAGE=neon in .env once the values above are in place.")
+        return 1
+
+    problems = []
+    try:
+        store.s3.head_bucket(Bucket=bucket)
+        print("  bucket       : reachable")
+    except Exception as exc:  # noqa: BLE001
+        problems.append(f"bucket {bucket}: {exc}")
+        print(f"  bucket       : NOT reachable ({exc})")
+    try:
+        store.init_schema()          # makes sure the table is there
+        conn = store._conn()         # noqa: SLF001 - the check is the point here
+        with conn.cursor() as cur:
+            cur.execute("select count(*) from files where not is_dir")
+            files = cur.fetchone()[0]
+            cur.execute("select count(*) from files where is_dir")
+            folders = cur.fetchone()[0]
+        print("  database     : reachable")
+        print(f"  rows         : {files} file(s), {folders} folder(s)")
+    except Exception as exc:  # noqa: BLE001
+        problems.append(f"database: {exc}")
+        print(f"  database     : NOT reachable ({exc})")
+
+    print("")
+    if problems:
+        print("[ERROR] Neon is configured but not usable:")
+        for p in problems:
+            print("        - " + p)
+        return 1
+    print("[OK] Neon storage is ready - uploads, edits and folders all go there.")
+    return 0
+
+
+def migrate_local_to_neon(*, dry_run: bool = False) -> int:
+    """Copy everything under ``./downloads`` into Neon, then exit.
+
+    One-shot helper for the switch: the bucket and the metadata table start
+    empty, so without this the site would come up empty. Files already in
+    Neon are left alone, and nothing is removed from disk - the copy is
+    repeatable and the local folder stays as a backup.
+    """
+    log = logging.getLogger("public-download-server")
+    store = storage()
+    if store is None:
+        log.error(
+            "Neon is not configured, so there is nothing to migrate to. "
+            "Fill in BUCKET_NAME and DATABASE_URL in .env first."
+        )
+        return 1
+    root = DOWNLOADS_DIR.resolve()
+    if not root.is_dir():
+        log.error("downloads folder not found: %s", root)
+        return 1
+
+    moved = skipped = failed = 0
+    total_bytes = 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        rel_dir = Path(dirpath).relative_to(root).as_posix()
+        rel_dir = "" if rel_dir == "." else rel_dir
+        if not dry_run and rel_dir:
+            try:
+                store.record_dir(rel_dir, user=store.default_user)
+            except Exception:  # noqa: BLE001 - a folder row is not critical
+                log.warning("could not record folder %s", rel_dir, exc_info=True)
+        for name in sorted(filenames):
+            if name.startswith("."):
+                continue
+            path = Path(dirpath) / name
+            rel = f"{rel_dir}/{name}" if rel_dir else name
+            try:
+                if store.exists(rel):
+                    skipped += 1
+                    continue
+                size = path.stat().st_size
+                ctype = neon.guess_content_type(name) or "application/octet-stream"
+                if dry_run:
+                    log.info("would copy %s (%s)", rel, human_size(size))
+                else:
+                    with open(path, "rb") as fh:
+                        store.put_object(rel, fh.read(), content_type=ctype)
+                    store.record_file(
+                        rel, name=name, size=size, content_type=ctype,
+                        user=store.default_user,
+                    )
+                moved += 1
+                total_bytes += size
+            except Exception as exc:  # noqa: BLE001 - keep going, report at the end
+                failed += 1
+                log.warning("could not copy %s: %s", rel, exc)
+    log.info(
+        "%s: %d copied (%s), %d already there, %d failed",
+        "dry run" if dry_run else "migrated", moved, human_size(total_bytes), skipped, failed,
+    )
+    return 1 if failed else 0
+
+
 # Official, always-latest Cloudflare release asset for 64-bit Windows.
 CLOUDFLARED_DOWNLOAD_URL: str = (
     "https://github.com/cloudflare/cloudflared/releases/latest/download/"
@@ -9028,6 +9178,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--verbose", action="store_true",
         help="also print debug logs to the console",
     )
+    parser.add_argument(
+        "--check-storage", action="store_true",
+        help="check the Neon storage (bucket + database) and exit",
+    )
+    parser.add_argument(
+        "--migrate", action="store_true",
+        help="copy the files in ./downloads into Neon and exit",
+    )
+    parser.add_argument(
+        "--migrate-dry-run", action="store_true",
+        help="show what --migrate would copy, without writing anything",
+    )
     return parser
 
 
@@ -9054,6 +9216,11 @@ def main(argv: Optional[list] = None) -> int:
         BIN_DIR.mkdir(parents=True, exist_ok=True)
         exe = ensure_cloudflared(force_download=args.download_cloudflared)
         return 0 if exe else 1
+
+    if args.check_storage:
+        return check_storage_setup()
+    if args.migrate or args.migrate_dry_run:
+        return migrate_local_to_neon(dry_run=args.migrate_dry_run)
 
     try:
         return run(args)
