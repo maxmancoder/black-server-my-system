@@ -8832,6 +8832,25 @@ def run(args: argparse.Namespace) -> int:
         if store is not None:
             print(f"[OK] Storage backend: Neon Object Storage + Postgres "
                   f"(bucket={store.bucket})")
+            # A fresh bucket with the old files still on disk would look like an
+            # empty site, so say so before the user wonders where they went.
+            try:
+                stored = len(store.list_dir(""))
+            except Exception as exc:  # noqa: BLE001 - the check is a courtesy
+                stored = -1
+                print(f"[!] could not read the file list from Neon: {exc}")
+            local = 0
+            try:
+                local = sum(1 for p in DOWNLOADS_DIR.rglob("*") if p.is_file()
+                            and not any(part.startswith(".") for part in p.relative_to(DOWNLOADS_DIR).parts))
+            except OSError:
+                local = 0
+            if stored == 0 and local:
+                print(f"[!] Neon holds no files yet, but {local} file(s) are still in "
+                      f"{DOWNLOADS_DIR.name}/.")
+                print("    Run:  python server.py --migrate   to move them into Neon")
+            elif stored >= 0:
+                print(f"    Neon holds {stored} item(s) in the root folder.")
         else:
             print("[i] Storage backend: local disk (Neon not configured).")
 
